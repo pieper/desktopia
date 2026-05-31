@@ -103,6 +103,8 @@ case "$cmd" in
     "$0" sync; remote 'cd /root/desktopia && bash wl-fixwayland.sh' ;;
   wltest)    # bring up the compositor + a GL client; confirm NVIDIA renderer + capture frames
     "$0" sync; remote 'cd /root/desktopia && bash wltest.sh' ;;
+  gametest)  # gamescope nested -> XWayland -> X11 GL app (glxgears); prove the Slicer path
+    "$0" sync; remote 'cd /root/desktopia && bash gametest.sh' ;;
   inspect)   # probe a vastai/linux-desktop box: display, GL renderer, Selkies, toolchain
     "$0" sync; remote 'cd /root/desktopia && bash scripts/inspect_desktop.sh' ;;
   status)
