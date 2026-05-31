@@ -13,7 +13,9 @@
 #   ./vast.sh status                 # detailed lifecycle state (actual/intended/status_msg)
 #   ./vast.sh logs                   # tail instance logs (shows docker pull progress)
 #   ./vast.sh port                   # print the public IP:PORT mapped to 4433/udp
-#   ./vast.sh down                   # destroy the (first) instance
+#   ./vast.sh stop                   # stop (pause GPU billing, keep disk for a fast restart)
+#   ./vast.sh start                  # restart a stopped instance (seconds if GPU still free)
+#   ./vast.sh down                   # destroy the instance (deletes disk, stops all billing)
 #
 # Set DESKTOPIA_INSTANCE to pin a specific id; otherwise the first running one is used.
 set -euo pipefail
@@ -98,6 +100,8 @@ import sys,json; d=json.load(sys.stdin); pm=d.get("ports") or {}
 m=pm.get("4433/udp");
 print(f"{d.get(\"public_ipaddr\")}:{m[0][\"HostPort\"]}") if m else print("4433/udp not mapped yet", file=sys.stderr)'
     ;;
+  stop)  vastai stop instance "$(instance_id)" ;;
+  start) vastai start instance "$(instance_id)" ;;
   down|destroy) vastai destroy instance "$(instance_id)" ;;
   *) sed -n '2,30p' "$0" ;;
 esac
