@@ -27,10 +27,11 @@ ps -eo args 2>/dev/null | grep -i "selkies\|nvh264\|nvenc\|ximagesrc" | grep -v 
 
 echo; echo "===== GL renderer per display (the decisive bit) ====="
 command -v glxinfo >/dev/null || echo "  glxinfo not installed (mesa-utils); install to confirm"
-for d in 0 1 2; do
-  [ -e "/tmp/.X11-unix/X$d" ] || continue
+shopt -s nullglob
+for sock in /tmp/.X11-unix/X*; do          # enumerate REAL displays (e.g. :20), not just :0-2
+  d=${sock##*/X}
   r=$(DISPLAY=:$d glxinfo -B 2>/dev/null | grep -iE "OpenGL renderer|OpenGL vendor")
-  echo ":$d -> ${r:-<no GL / glxinfo missing>}"
+  echo ":$d -> ${r:-<no GL / glxinfo failed>}"
 done
 
 echo; echo "===== listening ports (VNC 5900/5901, noVNC 6080, etc.) ====="
