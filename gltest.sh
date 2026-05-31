@@ -24,6 +24,12 @@ rest=${RAW#*:}; bus=${rest%%:*}; df=${rest#*:}; dev=${df%%.*}; func=${df#*.}
 BUS=$(printf "PCI:%d:%d:%d" "0x$bus" "0x$dev" "0x$func")
 echo "== xorg BusID: $BUS (from $RAW) =="
 
+echo "== device visibility (does Xorg's PCI scan even see the GPU?) =="
+ls -l /dev/nvidia* 2>/dev/null || echo "  no /dev/nvidia* (but nvidia-smi worked, so unlikely)"
+echo -n "  GPU in /sys/bus/pci/devices: "
+ls /sys/bus/pci/devices/ 2>/dev/null | grep -i ":${bus,,}:" || echo "MISSING — Xorg can't find it via PCI -> 'no screens found'"
+ls -l /dev/dri/ 2>/dev/null || echo "  no /dev/dri (no DRM card/render nodes; nomodset on host)"
+
 cat > /etc/X11/xorg.conf <<EOF
 Section "ServerLayout"
     Identifier "layout"
@@ -52,7 +58,11 @@ XPID=$!
 for i in $(seq 1 50); do [ -e /tmp/.X11-unix/X0 ] && break; sleep 0.2; done
 
 if [ ! -e /tmp/.X11-unix/X0 ]; then
-  echo "FAIL: Xorg did not start. Last log lines:"; tail -n 25 /tmp/xorg.log
+  echo "FAIL: Xorg did not start."
+  echo "--- /var/log/Xorg.0.log : NVIDIA / EE / WW / device lines (the real reason) ---"
+  grep -nE "\(EE\)|\(WW\)|NVIDIA|nvidia|[Ss]creen|[Dd]evice|BusID|modeset|drm|PCI|ABI" \
+    /var/log/Xorg.0.log 2>/dev/null | tail -n 45 || echo "  (no /var/log/Xorg.0.log)"
+  echo "--- stderr tail ---"; tail -n 12 /tmp/xorg.log
   echo "Fallbacks: headless Wayland (cage/wlroots)+pipewiresrc, or EGL offscreen (no X)."
   kill "$XPID" 2>/dev/null; exit 1
 fi
