@@ -4,6 +4,9 @@ A vast.ai GPU container that renders a desktop (3D Slicer / `glxgears`), hardwar
 it with NVENC, and streams it to a custom web page over **QUIC / WebTransport** — a modern,
 WebRTC-free take on noVNC.
 
+> **New here?** [SETUP.md](SETUP.md) replicates everything from scratch (repo, CI→GHCR,
+> vast.ai key, dev loop). [SECURITY.md](SECURITY.md) covers the key scope / spend cap / 2FA model.
+
 ## Data path
 
 ```
