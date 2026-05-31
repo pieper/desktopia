@@ -115,7 +115,7 @@ Two phases (full detail in `README.md`). Phase 1 debugs in-container behavior on
 image without rebuilding; Phase 2 runs the baked GHCR image.
 
 ```bash
-# --- Phase 1: interactive debugging on a CUDA base image (no Docker) ---
+# --- Phase 1: interactive debugging on a vast pre-cached desktop image (no Docker) ---
 make search                 # pick an OFFER_ID (cheapest single RTX 4090 first)
 make up OFFER=<id>          # launch CUDA base + UDP port 4433 + graphics caps
 make ls                     # instance id + status
@@ -147,7 +147,7 @@ one when several are running.
 Applied automatically by `vast.sh`; here for manual `vastai create instance` use:
 
 ```
---image  nvidia/cuda:12.4.1-runtime-ubuntu24.04   # Phase 1 (or ghcr.io/pieper/desktopia:latest)
+--image  vastai/linux-desktop:cuda-12.9-ubuntu24.04-2026-05-21   # Phase 1, vast-cached (or ghcr.io/pieper/desktopia:latest)
 --env    '-p 4433:4433/udp -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE_DEVICES=all'
 --disk   40
 --ssh --direct

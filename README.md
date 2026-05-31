@@ -54,7 +54,7 @@ GLVND / GStreamer / aioquic sharp edges get resolved.
 pip install --user vastai && vastai set api-key <YOUR_KEY>
 make search                 # offers ranked by estimated-latency tier, then price
 make best                   # the single closest-then-cheapest offer id (PCIe >= 23)
-make up-best                # launch that best offer directly (CUDA base image)
+make up-best                # launch that best offer directly (vast pre-cached desktop image)
 make up OFFER=<OFFER_ID>     # or launch a specific offer id
 make ls                     # instance id + status (wait for it to come up)
 make provision              # install deps on the bare instance (runs provision.sh)

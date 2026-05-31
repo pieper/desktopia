@@ -29,7 +29,10 @@ if [ -n "${DESKTOPIA_SSH_KEY:-}" ]; then
   SSH_OPTS="$SSH_OPTS -i ${DESKTOPIA_SSH_KEY/#\~/$HOME} -o IdentitiesOnly=yes"
 fi
 GHCR_IMAGE="ghcr.io/pieper/desktopia:latest"
-BASE_IMAGE="nvidia/cuda:12.4.1-runtime-ubuntu24.04"
+# Phase-1 test base. Use a vast.ai-PRE-CACHED image so it loads in seconds, not minutes.
+# (nvidia/cuda:*-ubuntu24.04 exists only for CUDA >=12.5 AND isn't vast-cached -> slow/typo-prone.)
+# This is the same family as the user's existing desktop box; has nvidia-smi/glxinfo/X/ffmpeg.
+BASE_IMAGE="vastai/linux-desktop:cuda-12.9-ubuntu24.04-2026-05-21"
 ENVOPTS='-p 4433:4433/udp -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE_DEVICES=all'
 # Region matters for interactive latency (motion-to-photon is RTT-bound). Constrain to
 # North America by default; override e.g. SEARCH_GEO='geolocation in [US]' for US-only.
