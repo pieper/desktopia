@@ -7,7 +7,9 @@
 #   ./vast.sh ls                     # show instances + mapped ports
 #   ./vast.sh ssh                    # ssh into the (first) instance
 #   ./vast.sh sync                   # rsync this repo to /root/desktopia on the instance
+#   ./vast.sh provision              # sync, then install deps (provision.sh) on the instance
 #   ./vast.sh run                    # sync, then run entrypoint.sh on the instance
+#   ./vast.sh gltest                 # sync+provision, then Xorg go/no-go (glxinfo renderer)
 #   ./vast.sh logs                   # tail instance logs
 #   ./vast.sh port                   # print the public IP:PORT mapped to 4433/udp
 #   ./vast.sh down                   # destroy the (first) instance
@@ -33,6 +35,22 @@ instance_id() {
   vastai show instances --raw | python3 -c 'import sys,json; xs=json.load(sys.stdin); print(xs[0]["id"]) if xs else sys.exit("no instances")'
 }
 
+# Parse `vastai ssh-url` (e.g. ssh://root@host:port) into "PORT USER HOST", robust to the
+# user@/host:port/bare-host variants. Read with: read -r PORT USER_ HOST < <(ssh_parts)
+ssh_parts() {
+  local url; url=$(vastai ssh-url "$(instance_id)"); url=${url#ssh://}
+  local user=root host=$url port=22
+  case "$host" in *@*) user=${host%%@*}; host=${host#*@};; esac
+  case "$host" in *:*) port=${host##*:}; host=${host%:*};; esac
+  echo "$port $user $host"
+}
+
+# Run a command on the instance over ssh (allocates a TTY for live output).
+remote() {
+  local PORT USER_ HOST; read -r PORT USER_ HOST < <(ssh_parts)
+  ssh -t -o StrictHostKeyChecking=accept-new -p "$PORT" "$USER_@$HOST" "$@"
+}
+
 cmd=${1:-help}; shift || true
 case "$cmd" in
   search)  # price/geo/net/reliability/PCIe table, cheapest first
@@ -47,19 +65,20 @@ case "$cmd" in
     vastai create instance "$offer" --image "$img" --env "$ENVOPTS" --disk 40 --ssh --direct
     ;;
   ls|list) vastai show instances ;;
-  ssh)  exec bash -c "$(vastai ssh-url "$(instance_id)")" ;;
   url)  vastai ssh-url "$(instance_id)" ;;
+  ssh)
+    PORT="" USER_="" HOST=""; read -r PORT USER_ HOST < <(ssh_parts)
+    exec ssh -o StrictHostKeyChecking=accept-new -p "$PORT" "$USER_@$HOST"
+    ;;
   sync)
-    url=$(vastai ssh-url "$(instance_id)")
-    # ssh-url is like ssh://root@host:port ; split for rsync -e
-    host=$(echo "$url" | sed -E 's#ssh://([^:]+@[^:]+):([0-9]+)#\1#'); port=$(echo "$url" | sed -E 's#.*:([0-9]+)$#\1#')
-    rsync -av --exclude '.git' --exclude '__pycache__' -e "ssh -p $port" ./ "$host:/root/desktopia/"
+    PORT="" USER_="" HOST=""; read -r PORT USER_ HOST < <(ssh_parts)
+    rsync -av --exclude '.git' --exclude '__pycache__' --exclude '.venv' \
+      -e "ssh -o StrictHostKeyChecking=accept-new -p $PORT" ./ "$USER_@$HOST:/root/desktopia/"
     ;;
-  run)
-    "$0" sync
-    url=$(vastai ssh-url "$(instance_id)")
-    bash -c "$url" -t 'cd /root/desktopia && bash entrypoint.sh'
-    ;;
+  provision) "$0" sync; remote 'cd /root/desktopia && bash provision.sh' ;;
+  run)       "$0" sync; remote 'cd /root/desktopia && bash entrypoint.sh' ;;
+  gltest)    # sharp edge #1 go/no-go: must print an NVIDIA renderer, not llvmpipe
+    "$0" sync; remote 'cd /root/desktopia && bash provision.sh && bash gltest.sh' ;;
   logs) vastai logs "$(instance_id)" ;;
   port)
     vastai show instance "$(instance_id)" --raw | python3 -c '

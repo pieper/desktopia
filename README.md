@@ -56,12 +56,19 @@ make search                 # offers ranked by estimated-latency tier, then pric
 make best                   # the single closest-then-cheapest offer id (PCIe >= 23)
 make up-best                # launch that best offer directly (CUDA base image)
 make up OFFER=<OFFER_ID>     # or launch a specific offer id
-make ls                     # instance id + status
-make ssh                    # shell in; run the apt block, then `bash entrypoint.sh`
-make sync                   # rsync the working tree to /root/desktopia
+make ls                     # instance id + status (wait for it to come up)
+make provision              # install deps on the bare instance (runs provision.sh)
+make gltest                 # SHARP EDGE #1 go/no-go: NVIDIA GL context, not llvmpipe
+make run                    # sync + run entrypoint.sh (Xorg + workload + QUIC server)
 make port                   # public IP:PORT mapped to 4433/udp -> paste into client/index.html
+make ssh                    # shell in to poke around by hand
 make down                   # destroy when done (stops billing)
 ```
+
+Deps live in `provision.sh` (a single source of truth shared by the Dockerfile and
+`make provision`), so the Phase-1 debug box and the Phase-2 image never drift. `make gltest`
+is the isolated first test to run after `provision`: it starts an NVIDIA-backed Xorg and
+fails loudly with diagnostics if you get `llvmpipe` (software) instead of a hardware context.
 
 `search`/`best` estimate each offer's RTT from its `geolocation` (centroid distance to your
 origin), bucket into ~20 ms latency tiers, and prefer the closest tier, then the cheapest
