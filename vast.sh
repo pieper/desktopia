@@ -101,6 +101,8 @@ case "$cmd" in
     "$0" sync; remote 'cd /root/desktopia && bash wl-check.sh' ;;
   wl-fixwayland) # build libwayland>=1.23 (distro 1.22 lacks wl_client_set_max_buffer_size)
     "$0" sync; remote 'cd /root/desktopia && bash wl-fixwayland.sh' ;;
+  wltest)    # bring up the compositor + a GL client; confirm NVIDIA renderer + capture frames
+    "$0" sync; remote 'cd /root/desktopia && bash wltest.sh' ;;
   inspect)   # probe a vastai/linux-desktop box: display, GL renderer, Selkies, toolchain
     "$0" sync; remote 'cd /root/desktopia && bash scripts/inspect_desktop.sh' ;;
   status)
