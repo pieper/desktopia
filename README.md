@@ -52,14 +52,22 @@ GLVND / GStreamer / aioquic sharp edges get resolved.
 
 ```bash
 pip install --user vastai && vastai set api-key <YOUR_KEY>
-make search                 # cheapest single RTX 4090 offers
-make up OFFER=<OFFER_ID>     # launch CUDA base image with the UDP port + graphics caps
+make search                 # offers ranked by estimated-latency tier, then price
+make best                   # the single closest-then-cheapest offer id (PCIe >= 23)
+make up-best                # launch that best offer directly (CUDA base image)
+make up OFFER=<OFFER_ID>     # or launch a specific offer id
 make ls                     # instance id + status
 make ssh                    # shell in; run the apt block, then `bash entrypoint.sh`
 make sync                   # rsync the working tree to /root/desktopia
 make port                   # public IP:PORT mapped to 4433/udp -> paste into client/index.html
 make down                   # destroy when done (stops billing)
 ```
+
+`search`/`best` estimate each offer's RTT from its `geolocation` (centroid distance to your
+origin), bucket into ~20 ms latency tiers, and prefer the closest tier, then the cheapest
+within it. Origin defaults to Boston — set `DESKTOPIA_ORIGIN="lat,lon"` (e.g. your city) to
+re-rank. Region prefilter is `SEARCH_GEO` (default `geolocation in [US,CA]`). The `~ms` column
+is a model estimate, not a ping — confirm with `mtr`/`ping` once an instance is up.
 
 **Phase 2 — bake into an image via CI.** Once Phase-1 commands work, they're already the
 Dockerfile. Pushing to `main` triggers `.github/workflows/build.yml`, which builds on free
