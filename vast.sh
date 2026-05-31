@@ -10,7 +10,8 @@
 #   ./vast.sh provision              # sync, then install deps (provision.sh) on the instance
 #   ./vast.sh run                    # sync, then run entrypoint.sh on the instance
 #   ./vast.sh gltest                 # sync+provision, then Xorg go/no-go (glxinfo renderer)
-#   ./vast.sh logs                   # tail instance logs
+#   ./vast.sh status                 # detailed lifecycle state (actual/intended/status_msg)
+#   ./vast.sh logs                   # tail instance logs (shows docker pull progress)
 #   ./vast.sh port                   # print the public IP:PORT mapped to 4433/udp
 #   ./vast.sh down                   # destroy the (first) instance
 #
@@ -80,6 +81,16 @@ case "$cmd" in
   run)       "$0" sync; remote 'cd /root/desktopia && bash entrypoint.sh' ;;
   gltest)    # sharp edge #1 go/no-go: must print an NVIDIA renderer, not llvmpipe
     "$0" sync; remote 'cd /root/desktopia && bash provision.sh && bash gltest.sh' ;;
+  status)
+    vastai show instance "$(instance_id)" --raw | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+for k in ("actual_status","intended_status","cur_state","next_state","status_msg",
+          "gpu_name","machine_id","image_uuid","disk_space","inet_down"):
+    v = d.get(k)
+    if v not in (None, ""):
+        print(f"{k:16}: {v}")'
+    ;;
   logs) vastai logs "$(instance_id)" ;;
   port)
     vastai show instance "$(instance_id)" --raw | python3 -c '
