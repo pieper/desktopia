@@ -11,14 +11,17 @@ export WAYLAND_DISPLAY=wayland-1
 SOCK="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
 unset DISPLAY
 
-if ! command -v gamescope >/dev/null; then
-  echo "== installing gamescope + glxgears =="
+# cage = lightweight wlroots single-app kiosk compositor; provides XWayland, takes `-- cmd`,
+# and runs NESTED as a Wayland client (render node only, no DRM/KMS -> dodges wlroots+NVIDIA
+# DRM issues). (gamescope isn't packaged for Ubuntu 24.04.)
+if ! command -v cage >/dev/null; then
+  echo "== installing cage + xwayland + glxgears =="
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq && apt-get install -y --no-install-recommends gamescope mesa-utils \
-    || echo "WARN: apt gamescope failed (may need a source build)"
+  apt-get update -qq && apt-get install -y --no-install-recommends cage xwayland mesa-utils \
+    || echo "WARN: apt cage failed"
 fi
-command -v gamescope >/dev/null || { echo "FAIL: gamescope not available"; exit 1; }
-echo "gamescope: $(gamescope --version 2>&1 | head -1)"
+command -v cage >/dev/null || { echo "FAIL: cage not available (try sway/weston instead)"; exit 1; }
+echo "cage: $(cage --version 2>&1 | head -1)"
 
 rm -f "$SOCK" /tmp/game-*.png
 echo "== outer compositor -> PNG frames =="
@@ -31,12 +34,15 @@ for i in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 0.25; done
 [ -S "$SOCK" ] || { echo "FAIL: no compositor socket"; tail -n 20 /tmp/game-gst.log; kill "$GSTPID" 2>/dev/null; exit 1; }
 echo "compositor socket up: $SOCK"
 
-echo "== gamescope (nested, wayland backend) running glxgears via its XWayland =="
-WAYLAND_DISPLAY=wayland-1 timeout 14 gamescope --backend wayland -W 1280 -H 720 -- glxgears -info \
-  >/tmp/game-scope.log 2>&1 &
+echo "== cage (nested wlroots, render node) running glxgears via its XWayland =="
+WAYLAND_DISPLAY=wayland-1 \
+WLR_BACKENDS=wayland \
+WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128 \
+WLR_NO_HARDWARE_CURSORS=1 \
+  timeout 14 cage -- glxgears -info >/tmp/game-scope.log 2>&1 &
 sleep 11
-echo "-- gamescope/glxgears log (look for GL_RENDERER = NVIDIA) --"
-grep -iE "renderer|nvidia|llvmpipe|xwayland|error|fail" /tmp/game-scope.log | head -20
+echo "-- cage/glxgears log (look for GL_RENDERER = NVIDIA, XWayland up) --"
+grep -iE "renderer|nvidia|llvmpipe|xwayland|error|fail|backend" /tmp/game-scope.log | head -20
 echo "-- (full tail) --"; tail -n 12 /tmp/game-scope.log
 
 kill "$GSTPID" 2>/dev/null; wait "$GSTPID" 2>/dev/null
