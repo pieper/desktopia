@@ -93,6 +93,8 @@ case "$cmd" in
   run)       "$0" sync; remote 'cd /root/desktopia && bash entrypoint.sh' ;;
   gltest)    # sharp edge #1 go/no-go: must print an NVIDIA renderer, not llvmpipe
     "$0" sync; remote 'cd /root/desktopia && bash provision.sh && bash gltest.sh' ;;
+  egltest)   # confirm hardware GL via EGL (no X, no DRM master) -- the clean render path
+    "$0" sync; remote 'cd /root/desktopia && bash egltest.sh' ;;
   inspect)   # probe a vastai/linux-desktop box: display, GL renderer, Selkies, toolchain
     "$0" sync; remote 'cd /root/desktopia && bash scripts/inspect_desktop.sh' ;;
   status)

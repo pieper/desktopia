@@ -1,5 +1,5 @@
 # Thin wrapper over vast.sh for the dev/test loop. See vast.sh for details.
-.PHONY: search best up up-best up-ghcr ls ssh sync provision run gltest inspect status logs port stop start down
+.PHONY: search best up up-best up-ghcr ls ssh sync provision run gltest egltest inspect status logs port stop start down
 
 search:    ; ./vast.sh search
 best:      ; ./vast.sh best
@@ -12,6 +12,7 @@ sync:      ; ./vast.sh sync
 provision: ; ./vast.sh provision
 run:       ; ./vast.sh run
 gltest:    ; ./vast.sh gltest
+egltest:   ; ./vast.sh egltest
 inspect:   ; ./vast.sh inspect
 status:    ; ./vast.sh status
 logs:      ; ./vast.sh logs
