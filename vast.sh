@@ -15,6 +15,7 @@
 # Set DESKTOPIA_INSTANCE to pin a specific id; otherwise the first running one is used.
 set -euo pipefail
 
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 GHCR_IMAGE="ghcr.io/pieper/desktopia:latest"
 BASE_IMAGE="nvidia/cuda:12.4.1-runtime-ubuntu24.04"
 ENVOPTS='-p 4433:4433/udp -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE_DEVICES=all'
@@ -34,22 +35,11 @@ instance_id() {
 
 cmd=${1:-help}; shift || true
 case "$cmd" in
-  search)
-    # Show the columns that actually drive the choice: price, geo, net, reliability, PCIe.
-    vastai search offers "$SEARCH_Q" -o dph_total --raw | python3 - <<'PY'
-import sys, json
-xs = json.load(sys.stdin)
-xs.sort(key=lambda o: o.get("dph_total", 1e9))
-h = f"{'ID':>9} {'$/hr':>6} {'Geo':<16} {'Up':>5} {'Dn':>5} {'Rel%':>4} {'PCIe':>5} {'vCPU':>4} {'RAM':>5} {'Disk':>5} {'CUDA':>4}"
-print(h); print('-' * len(h))
-for o in xs[:25]:
-    print(f"{o.get('id',0):>9} {o.get('dph_total',0):>6.3f} {str(o.get('geolocation') or '')[:16]:<16} "
-          f"{o.get('inet_up',0):>5.0f} {o.get('inet_down',0):>5.0f} {o.get('reliability2',0)*100:>4.0f} "
-          f"{o.get('pcie_bw',0):>5.1f} {o.get('cpu_cores_effective',0) or 0:>4.0f} "
-          f"{(o.get('cpu_ram',0) or 0)/1024:>5.1f} {o.get('disk_space',0) or 0:>5.0f} {str(o.get('cuda_max_good') or ''):>4}")
-print(f"\n{len(xs)} offers match the region/net filters. Prefer PCIe >=23 for the readback path.", file=sys.stderr)
-PY
-    ;;
+  search)  # price/geo/net/reliability/PCIe table, cheapest first
+    vastai search offers "$SEARCH_Q" -o dph_total --raw | python3 "$HERE/scripts/offers.py" list ;;
+  best)    # print the single best OFFER_ID (cheapest with high PCIe) for `make up`
+    vastai search offers "$SEARCH_Q" -o dph_total --raw | python3 "$HERE/scripts/offers.py" best ;;
+  up-best) "$0" up "$("$0" best)" "${1:-base}" ;;
   up)
     offer=${1:?need OFFER_ID}; sel=${2:-base}
     img=$BASE_IMAGE; [ "$sel" = "ghcr" ] && img=$GHCR_IMAGE

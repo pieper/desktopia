@@ -1,8 +1,10 @@
 # Thin wrapper over vast.sh for the dev/test loop. See vast.sh for details.
-.PHONY: search up up-ghcr ls ssh sync run logs port down
+.PHONY: search best up up-best up-ghcr ls ssh sync run logs port down
 
 search:   ; ./vast.sh search
+best:     ; ./vast.sh best
 up:       ; ./vast.sh up $(OFFER)
+up-best:  ; ./vast.sh up-best
 up-ghcr:  ; ./vast.sh up $(OFFER) ghcr
 ls:       ; ./vast.sh ls
 ssh:      ; ./vast.sh ssh
