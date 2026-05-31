@@ -32,7 +32,8 @@ need vastai
 
 instance_id() {
   [ -n "${DESKTOPIA_INSTANCE:-}" ] && { echo "$DESKTOPIA_INSTANCE"; return; }
-  vastai show instances --raw | python3 -c 'import sys,json; xs=json.load(sys.stdin); print(xs[0]["id"]) if xs else sys.exit("no instances")'
+  vastai show instances-v1 --raw \
+    | python3 "$HERE/scripts/pick_instance.py" "$BASE_IMAGE" "$GHCR_IMAGE" desktopia
 }
 
 # Parse `vastai ssh-url` (e.g. ssh://root@host:port) into "PORT USER HOST", robust to the
@@ -64,7 +65,7 @@ case "$cmd" in
     echo "launching $img on offer $offer"
     vastai create instance "$offer" --image "$img" --env "$ENVOPTS" --disk 40 --ssh --direct
     ;;
-  ls|list) vastai show instances ;;
+  ls|list) vastai show instances-v1 ;;
   url)  vastai ssh-url "$(instance_id)" ;;
   ssh)
     PORT="" USER_="" HOST=""; read -r PORT USER_ HOST < <(ssh_parts)
