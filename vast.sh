@@ -95,6 +95,8 @@ case "$cmd" in
     "$0" sync; remote 'cd /root/desktopia && bash provision.sh && bash gltest.sh' ;;
   egltest)   # confirm hardware GL via EGL (no X, no DRM master) -- the clean render path
     "$0" sync; remote 'cd /root/desktopia && bash egltest.sh' ;;
+  wl-build)  # build+install gst-wayland-display (Smithay headless compositor) on the box
+    "$0" sync; remote 'cd /root/desktopia && bash provision-wayland.sh' ;;
   inspect)   # probe a vastai/linux-desktop box: display, GL renderer, Selkies, toolchain
     "$0" sync; remote 'cd /root/desktopia && bash scripts/inspect_desktop.sh' ;;
   status)
