@@ -17,7 +17,7 @@ if command -v eglinfo >/dev/null; then
   echo "$OUT" | grep -iE "Device platform|EGL_EXT_platform_device|EGL_MESA_platform|device .*:|OpenGL (vendor|renderer|core)" \
     | grep -iE "platform|renderer|vendor|device" | head -40
   echo "-- renderer lines --"
-  REND=$(echo "$OUT" | grep -i "OpenGL renderer")
+  REND=$(echo "$OUT" | grep -iE "OpenGL.*renderer")   # eglinfo prints "OpenGL core profile renderer:"
   echo "$REND"
   if echo "$REND" | grep -qi "nvidia"; then
     echo "PASS: hardware NVIDIA GL via EGL, no X / no DRM master needed. This is the render path."
