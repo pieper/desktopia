@@ -97,6 +97,8 @@ case "$cmd" in
     "$0" sync; remote 'cd /root/desktopia && bash egltest.sh' ;;
   wl-build)  # build+install gst-wayland-display (Smithay headless compositor) on the box
     "$0" sync; remote 'cd /root/desktopia && bash provision-wayland.sh' ;;
+  wl-check)  # locate the installed plugin + inspect it (real element name + properties)
+    "$0" sync; remote 'cd /root/desktopia && bash wl-check.sh' ;;
   inspect)   # probe a vastai/linux-desktop box: display, GL renderer, Selkies, toolchain
     "$0" sync; remote 'cd /root/desktopia && bash scripts/inspect_desktop.sh' ;;
   status)
