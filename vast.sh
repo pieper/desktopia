@@ -21,6 +21,13 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# SSH identity. vast authenticates with a key you registered; if it's a NON-default name
+# (e.g. ~/.ssh/vast-ai-rsa) ssh won't offer it unless it's in your agent. Set
+# DESKTOPIA_SSH_KEY=~/.ssh/vast-ai-rsa to point ssh/rsync straight at it (-i, IdentitiesOnly).
+SSH_OPTS="-o StrictHostKeyChecking=accept-new"
+if [ -n "${DESKTOPIA_SSH_KEY:-}" ]; then
+  SSH_OPTS="$SSH_OPTS -i ${DESKTOPIA_SSH_KEY/#\~/$HOME} -o IdentitiesOnly=yes"
+fi
 GHCR_IMAGE="ghcr.io/pieper/desktopia:latest"
 BASE_IMAGE="nvidia/cuda:12.4.1-runtime-ubuntu24.04"
 ENVOPTS='-p 4433:4433/udp -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE_DEVICES=all'
@@ -52,7 +59,7 @@ ssh_parts() {
 # Run a command on the instance over ssh (allocates a TTY for live output).
 remote() {
   local PORT USER_ HOST; read -r PORT USER_ HOST < <(ssh_parts)
-  ssh -t -o StrictHostKeyChecking=accept-new -p "$PORT" "$USER_@$HOST" "$@"
+  ssh -t $SSH_OPTS -p "$PORT" "$USER_@$HOST" "$@"
 }
 
 cmd=${1:-help}; shift || true
@@ -72,12 +79,12 @@ case "$cmd" in
   url)  vastai ssh-url "$(instance_id)" ;;
   ssh)
     PORT="" USER_="" HOST=""; read -r PORT USER_ HOST < <(ssh_parts)
-    exec ssh -o StrictHostKeyChecking=accept-new -p "$PORT" "$USER_@$HOST"
+    exec ssh $SSH_OPTS -p "$PORT" "$USER_@$HOST"
     ;;
   sync)
     PORT="" USER_="" HOST=""; read -r PORT USER_ HOST < <(ssh_parts)
     rsync -av --exclude '.git' --exclude '__pycache__' --exclude '.venv' \
-      -e "ssh -o StrictHostKeyChecking=accept-new -p $PORT" ./ "$USER_@$HOST:/root/desktopia/"
+      -e "ssh $SSH_OPTS -p $PORT" ./ "$USER_@$HOST:/root/desktopia/"
     ;;
   provision) "$0" sync; remote 'cd /root/desktopia && bash provision.sh' ;;
   run)       "$0" sync; remote 'cd /root/desktopia && bash entrypoint.sh' ;;
