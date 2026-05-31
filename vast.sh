@@ -101,6 +101,8 @@ case "$cmd" in
     "$0" sync; remote 'cd /root/desktopia && bash wl-check.sh' ;;
   wl-fixwayland) # build libwayland>=1.23 (distro 1.22 lacks wl_client_set_max_buffer_size)
     "$0" sync; remote 'cd /root/desktopia && bash wl-fixwayland.sh' ;;
+  wl-setup)  # one-shot rebuild-from-scratch on a fresh box: compositor + libwayland 1.25
+    "$0" sync; remote 'cd /root/desktopia && bash provision-wayland.sh && bash wl-fixwayland.sh' ;;
   wltest)    # bring up the compositor + a GL client; confirm NVIDIA renderer + capture frames
     "$0" sync; remote 'cd /root/desktopia && bash wltest.sh' ;;
   gametest)  # gamescope nested -> XWayland -> X11 GL app (glxgears); prove the Slicer path

@@ -16,6 +16,7 @@ egltest:   ; ./vast.sh egltest
 wl-build:  ; ./vast.sh wl-build
 wl-check:  ; ./vast.sh wl-check
 wl-fixwayland: ; ./vast.sh wl-fixwayland
+wl-setup:  ; ./vast.sh wl-setup
 wltest:    ; ./vast.sh wltest
 gametest:  ; ./vast.sh gametest
 inspect:   ; ./vast.sh inspect
