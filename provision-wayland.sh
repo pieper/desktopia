@@ -10,7 +10,6 @@ echo "== apt deps (GStreamer dev + Smithay/wayland build deps + XWayland for Sli
 apt-get update
 apt-get install -y --no-install-recommends \
   build-essential pkg-config git curl ca-certificates \
-  cargo rustc \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   gstreamer1.0-tools gstreamer1.0-x \
@@ -19,6 +18,13 @@ apt-get install -y --no-install-recommends \
   libegl1-mesa-dev libgles2-mesa-dev libseat-dev libdisplay-info-dev \
   xwayland \
   mesa-utils-extra weston   # eglinfo + weston-simple-egl as Wayland GL test clients
+
+echo "== Rust via rustup (apt's rustc 1.75 is too old for current cargo-c, which needs 1.93) =="
+if [ ! -x "$HOME/.cargo/bin/rustc" ] && ! command -v rustup >/dev/null 2>&1; then
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+fi
+. "$HOME/.cargo/env"
+rustc --version
 
 echo "== cargo-c (provides cargo cinstall) =="
 command -v cargo-cinstall >/dev/null 2>&1 || cargo install cargo-c
