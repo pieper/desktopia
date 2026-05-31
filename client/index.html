@@ -1,0 +1,92 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Desktopia — WebTransport / WebCodecs client</title>
+<style>
+  body { margin: 0; background: #111; }
+  #v { width: 100vw; height: 100vh; object-fit: contain; }
+</style>
+</head>
+<body>
+<canvas id="v" width="1920" height="1080"></canvas>
+<script>
+// Fill these in from the running instance:
+const IP_PORT  = "YOUR_VAST_IP:MAPPED_UDP_PORT";   // from vast.ai "Open Ports"
+const CERT_B64 = "PASTE_CERT_SHA256_BASE64";       // printed by entrypoint.sh
+
+const HDR = 9; // u32 frame_id, u8 flags, u16 n_chunks, u16 chunk_idx
+const ctx = document.getElementById('v').getContext('2d');
+
+const decoder = new VideoDecoder({
+  output: f => { ctx.drawImage(f, 0, 0, 1920, 1080); f.close(); },
+  error: e => { console.warn("decode", e); needKey(); }
+});
+// No `description` => decoder expects Annex-B (matches stream-format=byte-stream)
+decoder.configure({ codec: "avc1.640028", optimizeForLatency: true });
+
+const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+(async () => {
+  const wt = new WebTransport(`https://${IP_PORT}/stream`, {
+    serverCertificateHashes: [{ algorithm: "sha-256", value: b64(CERT_B64) }]
+  });
+  await wt.ready;
+
+  let keyWriter;
+  async function needKey() {           // ask server for an IDR over a RELIABLE stream
+    if (!keyWriter) keyWriter = (await wt.createUnidirectionalStream()).getWriter();
+    await keyWriter.write(new Uint8Array([1]));
+  }
+  window.needKey = needKey;
+
+  const partial = new Map();           // frame_id -> {parts:[], have, n, key}
+  let ts = 0, haveKey = false, lastDone = -1;
+
+  function onDatagram(buf) {
+    const dv = new DataView(buf.buffer, buf.byteOffset);
+    const fid = dv.getUint32(0), flags = dv.getUint8(4);
+    const n = dv.getUint16(5), idx = dv.getUint16(7);
+    const isKey = (flags & 1) === 1;
+    const body = new Uint8Array(buf.buffer, buf.byteOffset + HDR);
+
+    // Drop late chunks for a frame we've already moved past.
+    if (fid <= lastDone) return;
+
+    let f = partial.get(fid);
+    if (!f) { f = { parts: new Array(n), have: 0, n, key: isKey }; partial.set(fid, f); }
+    if (!f.parts[idx]) { f.parts[idx] = body; f.have++; }
+
+    if (f.have === f.n) decodeFrame(fid, f);
+
+    // Loss detection: a higher frame completed first => this one lost a chunk. Abandon it.
+    for (const [oid, of] of partial) {
+      if (oid < fid && of.have < of.n) {
+        partial.delete(oid);
+        if (!of.key) haveKey && needKey();   // a delta gap => resync to next keyframe
+      }
+    }
+  }
+
+  function decodeFrame(fid, f) {
+    partial.delete(fid); lastDone = fid;
+    if (!haveKey && !f.key) { needKey(); return; }   // wait for an entry point
+    if (f.key) haveKey = true;
+    const data = new Uint8Array(f.parts.reduce((a, p) => a + p.length, 0));
+    let o = 0; for (const p of f.parts) { data.set(p, o); o += p.length; }
+    decoder.decode(new EncodedVideoChunk({
+      type: f.key ? "key" : "delta", timestamp: ts, data
+    }));
+    ts += 1e6 / 60;
+  }
+
+  const reader = wt.datagrams.readable.getReader();
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    onDatagram(value);
+  }
+})();
+</script>
+</body>
+</html>

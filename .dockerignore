@@ -1,0 +1,5 @@
+.git
+client/
+README.md
+*.pem
+__pycache__/
