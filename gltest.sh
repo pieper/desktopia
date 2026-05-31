@@ -17,9 +17,12 @@ ls /usr/lib/xorg/modules/drivers/nvidia_drv.so 2>/dev/null \
   && echo "nvidia_drv.so present (display cap injected)" \
   || echo "WARN: nvidia_drv.so not found — 'display' capability likely missing -> Xorg can't load nvidia"
 
+# Parse DOMAIN:BUS:DEVICE.FUNCTION (e.g. 00000000:C1:00.0) WITHOUT gawk's strtonum --
+# Ubuntu's default awk is mawk and lacks it; bash printf accepts 0x.. hex directly.
 RAW=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader | head -n1 | tr -d ' ')
-BUS=$(echo "$RAW" | awk -F: '{printf "PCI:%d:%d:%d", strtonum("0x"$2), strtonum("0x"$3), strtonum("0x"substr($4,1,index($4,".")-1))}')
-echo "== xorg BusID: $BUS =="
+rest=${RAW#*:}; bus=${rest%%:*}; df=${rest#*:}; dev=${df%%.*}; func=${df#*.}
+BUS=$(printf "PCI:%d:%d:%d" "0x$bus" "0x$dev" "0x$func")
+echo "== xorg BusID: $BUS (from $RAW) =="
 
 cat > /etc/X11/xorg.conf <<EOF
 Section "ServerLayout"

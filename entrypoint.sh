@@ -4,9 +4,11 @@ set -euo pipefail
 # xorg.conf is generated at boot because the PCI BusID differs per rented host.
 # nvidia-smi is injected by the NVIDIA Container Toolkit, so we derive it from there.
 
-# --- derive Xorg BusID from nvidia-smi (00000000:01:00.0 -> PCI:1:0:0) ---
+# --- derive Xorg BusID from nvidia-smi (00000000:C1:00.0 -> PCI:193:0:0) ---
+# Pure bash (no gawk strtonum; Ubuntu's default awk is mawk). bash printf accepts 0x.. hex.
 RAW=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader | head -n1 | tr -d ' ')
-BUS=$(echo "$RAW" | awk -F: '{printf "PCI:%d:%d:%d", strtonum("0x"$2), strtonum("0x"$3), strtonum("0x"substr($4,1,index($4,".")-1))}')
+rest=${RAW#*:}; bus=${rest%%:*}; df=${rest#*:}; dev=${df%%.*}; func=${df#*.}
+BUS=$(printf "PCI:%d:%d:%d" "0x$bus" "0x$dev" "0x$func")
 
 cat > /etc/X11/xorg.conf <<EOF
 Section "ServerLayout"
