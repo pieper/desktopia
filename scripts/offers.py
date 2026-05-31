@@ -69,6 +69,19 @@ COUNTRY = {
 }
 
 
+# Full country names -> ISO-2, so we match whether vast.ai gives "US" or "United States".
+NAME2CODE = {
+ "united states":"US","usa":"US","canada":"CA","mexico":"MX","brazil":"BR","argentina":"AR","chile":"CL",
+ "united kingdom":"GB","uk":"GB","britain":"GB","england":"GB","ireland":"IE","france":"FR","germany":"DE",
+ "netherlands":"NL","belgium":"BE","sweden":"SE","norway":"NO","finland":"FI","denmark":"DK","iceland":"IS",
+ "poland":"PL","czechia":"CZ","czech republic":"CZ","austria":"AT","switzerland":"CH","spain":"ES",
+ "portugal":"PT","italy":"IT","romania":"RO","ukraine":"UA","estonia":"EE","lithuania":"LT","latvia":"LV",
+ "russia":"RU","turkey":"TR","israel":"IL","india":"IN","china":"CN","hong kong":"HK","taiwan":"TW",
+ "south korea":"KR","korea":"KR","japan":"JP","singapore":"SG","vietnam":"VN","indonesia":"ID",
+ "australia":"AU","new zealand":"NZ","south africa":"ZA","united arab emirates":"AE","uae":"AE",
+}
+
+
 def haversine(a, b):
     (la1, lo1), (la2, lo2) = a, b
     r1, r2 = math.radians(la1), math.radians(la2)
@@ -77,17 +90,25 @@ def haversine(a, b):
     return 2 * 6371.0 * math.asin(math.sqrt(h))
 
 
+def _country_code(tok):
+    u = tok.upper()
+    if u in COUNTRY or u in ("US", "CA"):
+        return u
+    return NAME2CODE.get(tok.lower())
+
+
 def coords_for(geo):
+    """Order-agnostic: handles 'US, Texas', 'Texas, US', 'United States, Texas', 'US', 'Texas'."""
     if not geo:
         return None
-    parts = [p.strip() for p in str(geo).split(",")]
-    country = parts[0].upper()
-    region = parts[1].lower() if len(parts) > 1 else ""
-    if country in ("US", "USA", "UNITED STATES"):
-        return US.get(region, US_CENTER)
-    if country in ("CA", "CAN", "CANADA"):
-        return CAN.get(region, CAN_CENTER)
-    return COUNTRY.get(country)
+    toks = [t.strip() for t in str(geo).split(",") if t.strip()]
+    low = [t.lower() for t in toks]
+    code = next((c for t in toks if (c := _country_code(t))), None)
+    if code == "US" or any(t in US for t in low):
+        return next((US[t] for t in low if t in US), US_CENTER)
+    if code == "CA" or any(t in CAN for t in low):
+        return next((CAN[t] for t in low if t in CAN), CAN_CENTER)
+    return COUNTRY.get(code) if code else None
 
 
 def est_rtt(o):
