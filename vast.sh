@@ -134,11 +134,7 @@ for k in ("actual_status","intended_status","cur_state","next_state","status_msg
     ;;
   logs) vastai logs "$(instance_id)" ;;
   port)
-    vastai show instance "$(instance_id)" --raw | python3 -c '
-import sys,json; d=json.load(sys.stdin); pm=d.get("ports") or {}
-m=pm.get("4433/udp");
-print(f"{d.get(\"public_ipaddr\")}:{m[0][\"HostPort\"]}") if m else print("4433/udp not mapped yet", file=sys.stderr)'
-    ;;
+    vastai show instance "$(instance_id)" --raw | python3 "$HERE/scripts/port.py" ;;
   stop)  vastai stop instance "$(instance_id)" ;;
   start) vastai start instance "$(instance_id)" ;;
   down|destroy) vastai destroy instance "$(instance_id)" ;;
