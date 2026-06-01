@@ -28,8 +28,8 @@ for i in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 0.25; done
 [ -S "$SOCK" ] || { echo "FAIL: no compositor socket"; tail -n 20 /tmp/xway-gst.log; kill "$GSTPID" 2>/dev/null; exit 1; }
 echo "compositor socket up: $SOCK"
 
-echo "== rootful Xwayland :2 as a native Wayland client =="
-$NV Xwayland :2 -rootful -geometry 1280x720 >/tmp/xway-x.log 2>&1 &
+echo "== rootful Xwayland :2 as a native Wayland client (rootful is the default) =="
+$NV Xwayland :2 -geometry 1280x720 >/tmp/xway-x.log 2>&1 &
 XPID=$!
 for i in $(seq 1 40); do [ -e /tmp/.X11-unix/X2 ] && break; sleep 0.25; done
 [ -e /tmp/.X11-unix/X2 ] || { echo "FAIL: Xwayland :2 did not start"; tail -n 30 /tmp/xway-x.log; kill "$GSTPID" "$XPID" 2>/dev/null; exit 1; }
