@@ -1,8 +1,12 @@
-"""Desktopia streaming server: GStreamer appsink -> QUIC datagrams (WebTransport).
+"""Desktopia streaming server: GStreamer (Wayland compositor) -> QUIC datagrams (WebTransport).
 
-Captures the GPU X server, hardware-encodes via NVENC with intra-refresh, fragments
-each access unit into QUIC datagrams, and fans them out to every connected
-WebTransport session. A reliable WT stream from the client signals "send a keyframe".
+Runs gst-wayland-display's `waylanddisplaysrc` (a headless GPU Smithay compositor), encodes
+each frame to H.264 (NVENC if the host allows it, else software x264), fragments each access
+unit into QUIC datagrams, and fans them out to every connected WebTransport session. A reliable
+WT stream byte from the client means "send me a keyframe".
+
+The compositor pipeline starts immediately (so the Wayland socket exists and Xwayland/Slicer can
+render into it) regardless of viewers; datagrams only go out once a browser connects.
 """
 import argparse, asyncio, struct
 import gi
@@ -18,19 +22,25 @@ from aioquic.h3.events import HeadersReceived
 Gst.init(None)
 
 MTU = 1100                          # safe QUIC datagram payload (path MTU ~1200)
-HDR = struct.Struct(">IBHH")       # frame_id(u32), flags(u8), n_chunks(u16), chunk_idx(u16)
+HDR = struct.Struct(">IBHH")        # frame_id(u32), flags(u8), n_chunks(u16), chunk_idx(u16)
 FLAG_KEY = 0x01
+W, H, FPS = 1920, 1080, 30
 
-# NVENC tuned for low latency + loss resilience:
-#  - intra-refresh spreads I-blocks across frames (no full-IDR stalls on loss)
-#  - bframes=0, low-latency preset, CBR. Use nvav1enc on Ada/Blackwell for ~30% less bitrate.
-#  NOTE: verify property names against the actual image: gst-inspect-1.0 nvh264enc
+
+def encoder_bin():
+    """Prefer hardware NVENC; fall back to software x264. Constrain to H.264 High so the
+    browser's WebCodecs config (avc1.640028) matches. byte-stream/AU for Annex-B framing."""
+    caps = "video/x-h264,profile=high,stream-format=byte-stream,alignment=au"
+    if Gst.ElementFactory.find("nvh264enc"):
+        return f"nvh264enc name=enc bitrate=8000 ! {caps}"
+    return ("x264enc name=enc tune=zerolatency speed-preset=veryfast bitrate=8000 "
+            f"key-int-max={FPS} ! {caps}")
+
+
 PIPELINE = (
-    "ximagesrc use-damage=0 ! video/x-raw,framerate=60/1 ! videoconvert ! "
-    "nvh264enc name=enc preset=p1 tune=ultra-low-latency rc-mode=cbr bitrate=12000 "
-    "  gop-size=-1 bframes=0 ! "
-    "video/x-h264,stream-format=byte-stream,alignment=au ! "
-    "appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true"
+    f"waylanddisplaysrc ! video/x-raw,width={W},height={H},format=RGBx,framerate={FPS}/1 "
+    f"! videoconvert ! {encoder_bin()} "
+    "! appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true"
 )
 
 
@@ -40,18 +50,19 @@ class Broadcaster:
         self.loop = loop
         self.sessions = set()            # set[StreamProtocol]
         self.frame_id = 0
+        print("pipeline:", PIPELINE, flush=True)
         self.pipe = Gst.parse_launch(PIPELINE)
         self.enc = self.pipe.get_by_name("enc")
-        sink = self.pipe.get_by_name("sink")
-        sink.connect("new-sample", self._on_sample)
+        self.pipe.get_by_name("sink").connect("new-sample", self._on_sample)
+        bus = self.pipe.get_bus(); bus.add_signal_watch()
+        bus.connect("message::error", lambda _b, m: print("GST ERROR:", m.parse_error(), flush=True))
 
     def start(self):
         self.pipe.set_state(Gst.State.PLAYING)
 
     def force_keyframe(self):
-        self.enc.send_event(
-            Gst.Event.new_custom(Gst.EventType.CUSTOM_DOWNSTREAM,
-                Gst.Structure.new_empty("GstForceKeyUnit")))
+        self.enc.send_event(Gst.Event.new_custom(
+            Gst.EventType.CUSTOM_DOWNSTREAM, Gst.Structure.new_empty("GstForceKeyUnit")))
 
     def _on_sample(self, sink):
         sample = sink.emit("pull-sample")
@@ -62,11 +73,13 @@ class Broadcaster:
         data = bytes(mi.data)
         is_key = not (buf.get_flags() & Gst.BufferFlags.DELTA_UNIT)
         buf.unmap(mi)
-        # hop from the GStreamer streaming thread to the asyncio loop
-        self.loop.call_soon_threadsafe(self._fanout, data, is_key)
+        self.loop.call_soon_threadsafe(self._fanout, data, is_key)   # GStreamer thread -> asyncio
         return Gst.FlowReturn.OK
 
     def _fanout(self, data, is_key):
+        if not self.sessions:
+            self.frame_id += 1
+            return
         fid = self.frame_id & 0xFFFFFFFF
         self.frame_id += 1
         body = MTU - HDR.size
@@ -92,8 +105,7 @@ class StreamProtocol(QuicConnectionProtocol):
         elif self._h3 is not None:
             for e in self._h3.handle_event(event):
                 self._on_h3(e)
-            # back-channel: any reliable stream byte == "send me a keyframe"
-            if isinstance(event, StreamDataReceived) and event.data:
+            if isinstance(event, StreamDataReceived) and event.data:   # client asks for a keyframe
                 self.broadcaster.force_keyframe()
 
     def _on_h3(self, e):
@@ -103,14 +115,14 @@ class StreamProtocol(QuicConnectionProtocol):
                 self._session_id = e.stream_id
                 self._h3.send_headers(e.stream_id, [(b":status", b"200")])
                 self.broadcaster.sessions.add(self)
-                if self.broadcaster.frame_id == 0:
-                    self.broadcaster.start()
-                self.broadcaster.force_keyframe()   # new viewer needs an entry point
+                self.broadcaster.force_keyframe()         # new viewer needs an entry point
+                self.transmit()
+                print("viewer connected; sessions:", len(self.broadcaster.sessions), flush=True)
 
     def send_video_datagram(self, payload):
-        # associates the datagram with the WT session; API name varies by aioquic version
         try:
             self._h3.send_datagram(self._session_id, payload)
+            self.transmit()
         except Exception:
             pass
 
@@ -122,8 +134,7 @@ class StreamProtocol(QuicConnectionProtocol):
 
 async def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cert")
-    ap.add_argument("--key")
+    ap.add_argument("--cert"); ap.add_argument("--key")
     ap.add_argument("--port", type=int, default=4433)
     args = ap.parse_args()
 
@@ -133,9 +144,10 @@ async def main():
     loop = asyncio.get_running_loop()
     b = Broadcaster(loop)
     StreamProtocol.broadcaster = b
+    b.start()                                  # start the compositor NOW (so the WL socket appears)
 
     await serve("0.0.0.0", args.port, configuration=cfg, create_protocol=StreamProtocol)
-    print(f"WebTransport streamer on udp/{args.port}")
+    print(f"WebTransport streamer on udp/{args.port}", flush=True)
     await asyncio.Future()
 
 
