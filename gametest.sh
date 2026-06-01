@@ -23,6 +23,12 @@ fi
 command -v cage >/dev/null || { echo "FAIL: cage not available (try sway/weston instead)"; exit 1; }
 echo "cage: $(cage --version 2>&1 | head -1)"
 
+echo "== NVIDIA GBM/EGL backend presence (wlroots needs the nvidia gbm backend) =="
+ls /usr/lib/x86_64-linux-gnu/gbm/nvidia*gbm*.so* 2>/dev/null \
+  && echo "  nvidia gbm backend present" || echo "  WARN: nvidia-drm_gbm.so NOT found -> GBM falls back to dumb buffers (the failure we saw)"
+ls /usr/share/glvnd/egl_vendor.d/*nvidia*.json 2>/dev/null || echo "  WARN: no nvidia EGL vendor json"
+ls /usr/lib/x86_64-linux-gnu/libnvidia-allocator.so* 2>/dev/null || echo "  (no libnvidia-allocator)"
+
 rm -f "$SOCK" /tmp/game-*.png
 echo "== outer compositor -> PNG frames =="
 gst-launch-1.0 -e -q \
@@ -35,7 +41,13 @@ for i in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 0.25; done
 echo "compositor socket up: $SOCK"
 
 echo "== cage (nested wlroots, render node) running glxgears via its XWayland =="
+# Force the NVIDIA GBM backend so wlroots allocates render-node GPU buffers instead of
+# falling back to KMS dumb buffers (DRM_IOCTL_MODE_CREATE_DUMB: Permission denied).
 WAYLAND_DISPLAY=wayland-1 \
+GBM_BACKEND=nvidia-drm \
+__GLX_VENDOR_LIBRARY_NAME=nvidia \
+__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json \
+WLR_RENDERER=gles2 \
 WLR_BACKENDS=wayland \
 WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128 \
 WLR_NO_HARDWARE_CURSORS=1 \
