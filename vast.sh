@@ -109,6 +109,8 @@ case "$cmd" in
     "$0" sync; remote 'cd /root/desktopia && bash gametest.sh' ;;
   xwaytest)  # rootful Xwayland as a direct native client (no nested cage); capture a frame
     "$0" sync; remote 'cd /root/desktopia && bash xwaytest.sh' ;;
+  slicertest) # run 3D Slicer on rootful Xwayland (the real target) + capture a frame
+    "$0" sync; remote 'cd /root/desktopia && bash slicertest.sh' ;;
   pull)      # pull a file from the instance: make pull REMOTE=/path [LOCAL=./]
     PORT="" USER_="" HOST=""; read -r PORT USER_ HOST < <(ssh_parts)
     rsync -av -e "ssh $SSH_OPTS -p $PORT" "$USER_@$HOST:${1:?need REMOTE path}" "${2:-./}" ;;
