@@ -12,8 +12,11 @@
 <canvas id="v" width="1920" height="1080"></canvas>
 <script>
 // Fill these in from the running instance:
-const IP_PORT  = "YOUR_VAST_IP:MAPPED_UDP_PORT";   // from vast.ai "Open Ports"
-const CERT_B64 = "PASTE_CERT_SHA256_BASE64";       // printed by entrypoint.sh
+
+//const IP_PORT  = "YOUR_VAST_IP:MAPPED_UDP_PORT";   // from vast.ai "Open Ports"
+const IP_PORT  = "108.55.118.247:46286";   // from vast.ai "Open Ports"
+//const CERT_B64 = "PASTE_CERT_SHA256_BASE64";       // printed by entrypoint.sh
+const CERT_B64 = "xPyzt790227hK+5vILLwMW6kQv7I+huq0qUOdQ37ges=";       // printed by entrypoint.sh
 
 const HDR = 9; // u32 frame_id, u8 flags, u16 n_chunks, u16 chunk_idx
 const ctx = document.getElementById('v').getContext('2d');
@@ -33,12 +36,47 @@ const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
   });
   await wt.ready;
 
-  let keyWriter;
-  async function needKey() {           // ask server for an IDR over a RELIABLE stream
-    if (!keyWriter) keyWriter = (await wt.createUnidirectionalStream()).getWriter();
-    await keyWriter.write(new Uint8Array([1]));
-  }
+  // One reliable client->server stream carries keyframe requests AND input events.
+  const inW = (await wt.createUnidirectionalStream()).getWriter();
+  const send = a => inW.write(a).catch(() => {});
+  function needKey() { send(new Uint8Array([0x00])); }   // type 0 = keyframe request
   window.needKey = needKey;
+  setupInput(send);
+
+  function setupInput(send) {
+    const canvas = document.getElementById('v');
+    canvas.tabIndex = 0; canvas.focus();
+    const toBitmap = ev => {                    // map CSS coords -> 1920x1080 (object-fit: contain)
+      const r = canvas.getBoundingClientRect();
+      const s = Math.min(r.width / 1920, r.height / 1080);
+      const ox = (r.width - 1920 * s) / 2, oy = (r.height - 1080 * s) / 2;
+      const x = Math.max(0, Math.min(1919, Math.round((ev.clientX - r.left - ox) / s)));
+      const y = Math.max(0, Math.min(1079, Math.round((ev.clientY - r.top  - oy) / s)));
+      return [x, y];
+    };
+    const move = (x, y) => send(new Uint8Array([1, (x>>8)&255, x&255, (y>>8)&255, y&255]));
+    const btn  = b => (b === 0 ? 1 : b === 1 ? 2 : b === 2 ? 3 : 0);   // L/M/R
+    let last = 0;
+    canvas.addEventListener('mousemove', ev => {
+      const t = performance.now(); if (t - last < 16) return; last = t;   // ~60 Hz
+      const [x, y] = toBitmap(ev); move(x, y);
+    });
+    canvas.addEventListener('mousedown', ev => { canvas.focus(); const [x,y]=toBitmap(ev); move(x,y); send(new Uint8Array([2, btn(ev.button)])); });
+    canvas.addEventListener('mouseup',   ev => send(new Uint8Array([3, btn(ev.button)])));
+    canvas.addEventListener('contextmenu', ev => ev.preventDefault());
+    canvas.addEventListener('wheel', ev => { ev.preventDefault(); send(new Uint8Array([4, ev.deltaY < 0 ? 0 : 1])); }, { passive: false });
+    const KS = { Enter:0xFF0D, Backspace:0xFF08, Tab:0xFF09, Escape:0xFF1B, Delete:0xFFFF,
+      ArrowLeft:0xFF51, ArrowUp:0xFF52, ArrowRight:0xFF53, ArrowDown:0xFF54,
+      Home:0xFF50, End:0xFF57, PageUp:0xFF55, PageDown:0xFF56, Insert:0xFF63,
+      Shift:0xFFE1, Control:0xFFE3, Alt:0xFFE9, Meta:0xFFE7, CapsLock:0xFFE5, ' ':0x20 };
+    const keysym = ev => {
+      if (ev.key in KS) return KS[ev.key];
+      if (ev.key.length === 1) return ev.key.charCodeAt(0);
+      const m = /^F(\d+)$/.exec(ev.key); return m ? 0xFFBE + (+m[1] - 1) : 0;
+    };
+    window.addEventListener('keydown', ev => { const k = keysym(ev); if (k) { ev.preventDefault(); send(new Uint8Array([5, (k>>8)&255, k&255])); } });
+    window.addEventListener('keyup',   ev => { const k = keysym(ev); if (k) { ev.preventDefault(); send(new Uint8Array([6, (k>>8)&255, k&255])); } });
+  }
 
   const partial = new Map();           // frame_id -> {parts:[], have, n, key}
   let ts = 0, haveKey = false, lastDone = -1;

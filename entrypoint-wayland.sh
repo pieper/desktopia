@@ -24,6 +24,7 @@ export DEBIAN_FRONTEND=noninteractive
 gst-inspect-1.0 x264enc >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y --no-install-recommends gstreamer1.0-plugins-ugly gstreamer1.0-libav >/dev/null 2>&1; }
 command -v openbox  >/dev/null 2>&1 || apt-get install -y --no-install-recommends openbox wmctrl >/dev/null 2>&1
 python3 -c 'import aioquic' 2>/dev/null || pip3 install --break-system-packages "aioquic>=1.0" >/dev/null 2>&1
+python3 -c 'import Xlib'   2>/dev/null || apt-get install -y --no-install-recommends python3-xlib >/dev/null 2>&1
 
 # --- self-signed ECDSA P-256 cert, <=14 days (for WebTransport serverCertificateHashes) ---
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \

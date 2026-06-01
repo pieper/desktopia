@@ -26,6 +26,51 @@ HDR = struct.Struct(">IBHH")        # frame_id(u32), flags(u8), n_chunks(u16), c
 FLAG_KEY = 0x01
 W, H, FPS = 1920, 1080, 30
 
+# Client->server input protocol (reliable stream), fixed length per message type:
+#  0 keyframe-req[1]  1 move[1+x:u16+y:u16]  2 mousedown[1+btn]  3 mouseup[1+btn]
+#  4 wheel[1+dir(0=up,1=down)]  5 keydown[1+keysym:u16]  6 keyup[1+keysym:u16]
+MSG_LEN = {0: 1, 1: 5, 2: 2, 3: 2, 4: 2, 5: 3, 6: 3}
+
+
+class Injector:
+    """Replays browser input into the X app on :2 via XTEST (Slicer is an X client there)."""
+    def __init__(self, disp=":2"):
+        self.dispname = disp
+        self.d = None
+
+    def _ok(self):
+        if self.d is None:
+            try:
+                from Xlib import display
+                self.d = display.Display(self.dispname)
+            except Exception as e:
+                print("injector: cannot open", self.dispname, e, flush=True)
+                return False
+        return True
+
+    def move(self, x, y):
+        if not self._ok(): return
+        from Xlib import X
+        from Xlib.ext import xtest
+        xtest.fake_input(self.d, X.MotionNotify, x=x, y=y); self.d.sync()
+
+    def button(self, btn, press):
+        if not self._ok() or not btn: return
+        from Xlib import X
+        from Xlib.ext import xtest
+        xtest.fake_input(self.d, X.ButtonPress if press else X.ButtonRelease, btn); self.d.sync()
+
+    def wheel(self, down):
+        self.button(5 if down else 4, True); self.button(5 if down else 4, False)
+
+    def key(self, keysym, press):
+        if not self._ok() or not keysym: return
+        from Xlib import X
+        from Xlib.ext import xtest
+        kc = self.d.keysym_to_keycode(keysym)
+        if kc:
+            xtest.fake_input(self.d, X.KeyPress if press else X.KeyRelease, kc); self.d.sync()
+
 
 def encoder_bin():
     """Prefer hardware NVENC; fall back to software x264. Constrain to H.264 High so the
@@ -93,11 +138,13 @@ class Broadcaster:
 
 class StreamProtocol(QuicConnectionProtocol):
     broadcaster: Broadcaster = None
+    injector: Injector = None
 
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
         self._h3 = None
         self._session_id = None
+        self._inbuf = b""
 
     def quic_event_received(self, event):
         if isinstance(event, ProtocolNegotiated):
@@ -105,8 +152,32 @@ class StreamProtocol(QuicConnectionProtocol):
         elif self._h3 is not None:
             for e in self._h3.handle_event(event):
                 self._on_h3(e)
-            if isinstance(event, StreamDataReceived) and event.data:   # client asks for a keyframe
-                self.broadcaster.force_keyframe()
+            if isinstance(event, StreamDataReceived) and event.data:   # input + keyframe channel
+                self._inbuf += event.data
+                self._parse_input()
+
+    def _parse_input(self):
+        buf, i, n = self._inbuf, 0, len(self._inbuf)
+        while i < n:
+            t = buf[i]
+            ln = MSG_LEN.get(t)
+            if ln is None:        # desync on unknown type — drop the rest
+                i = n; break
+            if i + ln > n:
+                break
+            m = buf[i:i + ln]; i += ln
+            self._dispatch(m)
+        self._inbuf = buf[i:]
+
+    def _dispatch(self, m):
+        t = m[0]; inj = self.injector
+        if t == 0:   self.broadcaster.force_keyframe()
+        elif t == 1: inj.move((m[1] << 8) | m[2], (m[3] << 8) | m[4])
+        elif t == 2: inj.button(m[1], True)
+        elif t == 3: inj.button(m[1], False)
+        elif t == 4: inj.wheel(m[1] == 1)
+        elif t == 5: inj.key((m[1] << 8) | m[2], True)
+        elif t == 6: inj.key((m[1] << 8) | m[2], False)
 
     def _on_h3(self, e):
         if isinstance(e, HeadersReceived):
@@ -144,6 +215,7 @@ async def main():
     loop = asyncio.get_running_loop()
     b = Broadcaster(loop)
     StreamProtocol.broadcaster = b
+    StreamProtocol.injector = Injector(":2")   # XTEST into the Xwayland hosting Slicer
     b.start()                                  # start the compositor NOW (so the WL socket appears)
 
     await serve("0.0.0.0", args.port, configuration=cfg, create_protocol=StreamProtocol)
