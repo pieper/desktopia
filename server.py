@@ -17,7 +17,7 @@ from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import ProtocolNegotiated, StreamDataReceived
 from aioquic.h3.connection import H3Connection
-from aioquic.h3.events import HeadersReceived
+from aioquic.h3.events import HeadersReceived, WebTransportStreamDataReceived
 
 Gst.init(None)
 
@@ -152,7 +152,8 @@ class StreamProtocol(QuicConnectionProtocol):
         elif self._h3 is not None:
             for e in self._h3.handle_event(event):
                 self._on_h3(e)
-            if isinstance(event, StreamDataReceived) and event.data:   # input + keyframe channel
+            # Fallback: some aioquic versions surface WT uni-stream data as raw QUIC stream data.
+            if isinstance(event, StreamDataReceived) and event.data and event.stream_id != self._session_id:
                 self._inbuf += event.data
                 self._parse_input()
 
@@ -189,6 +190,9 @@ class StreamProtocol(QuicConnectionProtocol):
                 self.broadcaster.force_keyframe()         # new viewer needs an entry point
                 self.transmit()
                 print("viewer connected; sessions:", len(self.broadcaster.sessions), flush=True)
+        elif isinstance(e, WebTransportStreamDataReceived):   # input + keyframe channel
+            self._inbuf += e.data
+            self._parse_input()
 
     def send_video_datagram(self, payload):
         try:

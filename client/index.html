@@ -16,7 +16,7 @@
 //const IP_PORT  = "YOUR_VAST_IP:MAPPED_UDP_PORT";   // from vast.ai "Open Ports"
 const IP_PORT  = "108.55.118.247:46286";   // from vast.ai "Open Ports"
 //const CERT_B64 = "PASTE_CERT_SHA256_BASE64";       // printed by entrypoint.sh
-const CERT_B64 = "xPyzt790227hK+5vILLwMW6kQv7I+huq0qUOdQ37ges=";       // printed by entrypoint.sh
+const CERT_B64 = "2o5bCO0Q9bBExZOnKK0ZZYFXoKSAuMkWpE3eVuzoENI=";       // printed by entrypoint.sh
 
 const HDR = 9; // u32 frame_id, u8 flags, u16 n_chunks, u16 chunk_idx
 const ctx = document.getElementById('v').getContext('2d');
@@ -38,7 +38,10 @@ const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 
   // One reliable client->server stream carries keyframe requests AND input events.
   const inW = (await wt.createUnidirectionalStream()).getWriter();
-  const send = a => inW.write(a).catch(() => {});
+  console.log("input channel open");
+  let sent = 0;
+  const send = a => { sent++; if (sent <= 3 || sent % 200 === 0) console.log("sent", sent, "type", a[0]);
+                      return inW.write(a).catch(e => console.warn("send fail", e)); };
   function needKey() { send(new Uint8Array([0x00])); }   // type 0 = keyframe request
   window.needKey = needKey;
   setupInput(send);
