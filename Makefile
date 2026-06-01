@@ -22,6 +22,7 @@ gametest:  ; ./vast.sh gametest
 xwaytest:  ; ./vast.sh xwaytest
 slicertest: ; ./vast.sh slicertest
 streamtest: ; ./vast.sh streamtest
+nvenc-check: ; ./vast.sh nvenc-check
 pull:      ; ./vast.sh pull $(REMOTE) $(LOCAL)
 inspect:   ; ./vast.sh inspect
 status:    ; ./vast.sh status
