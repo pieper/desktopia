@@ -26,13 +26,18 @@ command -v openbox  >/dev/null 2>&1 || apt-get install -y --no-install-recommend
 python3 -c 'import aioquic' 2>/dev/null || pip3 install --break-system-packages "aioquic>=1.0" >/dev/null 2>&1
 python3 -c 'import Xlib'   2>/dev/null || apt-get install -y --no-install-recommends python3-xlib >/dev/null 2>&1
 
-# --- self-signed ECDSA P-256 cert, <=14 days (for WebTransport serverCertificateHashes) ---
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-  -keyout /tmp/key.pem -out /tmp/cert.pem -days 13 -nodes -subj "/CN=desktopia" 2>/dev/null
+# --- self-signed ECDSA P-256 cert, <=14 days (WebTransport serverCertificateHashes). ---
+# Persist it (survives restarts/stop-start) and only regenerate when missing/near-expiry,
+# so the cert hash you paste into the client stays stable between `make stream` runs.
+CERT=/root/desktopia-cert.pem; KEY=/root/desktopia-key.pem
+if [ ! -f "$CERT" ] || ! openssl x509 -in "$CERT" -checkend 86400 >/dev/null 2>&1; then
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+    -keyout "$KEY" -out "$CERT" -days 13 -nodes -subj "/CN=desktopia" 2>/dev/null
+fi
 
 # --- start the streaming server (compositor pipeline + QUIC) ---
 rm -f "$SOCK"
-python3 server.py --cert /tmp/cert.pem --key /tmp/key.pem --port 4433 >/tmp/server.log 2>&1 &
+python3 server.py --cert "$CERT" --key "$KEY" --port 4433 >/tmp/server.log 2>&1 &
 for i in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.25; done
 if [ ! -S "$SOCK" ]; then echo "FAIL: compositor socket never appeared. server.log:"; tail -n 40 /tmp/server.log; exit 1; fi
 echo "compositor + QUIC server up (socket $SOCK)"
@@ -52,7 +57,7 @@ fi
 
 echo "=================================================================="
 echo -n "CERT_SHA256_BASE64="
-openssl x509 -in /tmp/cert.pem -outform der | openssl dgst -sha256 -binary | base64
+openssl x509 -in "$CERT" -outform der | openssl dgst -sha256 -binary | base64
 echo "Now: 'make port' for the public IP:PORT, paste both into client/index.html, open in Chrome."
 echo "(server log: /tmp/server.log   slicer log: /tmp/slicer.log)"
 echo "=================================================================="
