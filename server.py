@@ -150,12 +150,8 @@ class StreamProtocol(QuicConnectionProtocol):
         if isinstance(event, ProtocolNegotiated):
             self._h3 = H3Connection(self._quic, enable_webtransport=True)
         elif self._h3 is not None:
-            for e in self._h3.handle_event(event):
+            for e in self._h3.handle_event(event):   # input arrives as WebTransportStreamDataReceived
                 self._on_h3(e)
-            # Fallback: some aioquic versions surface WT uni-stream data as raw QUIC stream data.
-            if isinstance(event, StreamDataReceived) and event.data and event.stream_id != self._session_id:
-                self._inbuf += event.data
-                self._parse_input()
 
     def _parse_input(self):
         buf, i, n = self._inbuf, 0, len(self._inbuf)
