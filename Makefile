@@ -1,5 +1,5 @@
 # Thin wrapper over vast.sh for the dev/test loop. See vast.sh for details.
-.PHONY: search best up up-best up-ghcr ls ssh sync provision run gltest egltest wl-build wl-check wl-fixwayland wltest gametest inspect status logs port stop start down
+.PHONY: search best up up-best up-ghcr ls ssh sync provision run gltest egltest wl-build wl-check wl-fixwayland wltest gametest xwaytest pull inspect status logs port stop start down
 
 search:    ; ./vast.sh search
 best:      ; ./vast.sh best
@@ -19,6 +19,8 @@ wl-fixwayland: ; ./vast.sh wl-fixwayland
 wl-setup:  ; ./vast.sh wl-setup
 wltest:    ; ./vast.sh wltest
 gametest:  ; ./vast.sh gametest
+xwaytest:  ; ./vast.sh xwaytest
+pull:      ; ./vast.sh pull $(REMOTE) $(LOCAL)
 inspect:   ; ./vast.sh inspect
 status:    ; ./vast.sh status
 logs:      ; ./vast.sh logs
