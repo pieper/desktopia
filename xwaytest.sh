@@ -7,13 +7,13 @@ set -uo pipefail
 export LD_LIBRARY_PATH=/usr/local/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}
 export GST_PLUGIN_PATH=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0:${GST_PLUGIN_PATH:-}
 export GST_REGISTRY_FORK=no
-export GBM_BACKEND=nvidia-drm
-export __GLX_VENDOR_LIBRARY_NAME=nvidia
-export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
 export XDG_RUNTIME_DIR=/tmp/wl-rt; mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
 export WAYLAND_DISPLAY=wayland-1
 SOCK="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
 unset DISPLAY
+# NVIDIA GBM/EGL env for CLIENTS ONLY (Xwayland/glxgears). It must NOT touch the compositor:
+# forcing the nvidia-only EGL vendor breaks gst-wayland-display's EGL_EXT_device_enumeration.
+NV="env GBM_BACKEND=nvidia-drm __GLX_VENDOR_LIBRARY_NAME=nvidia __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
 
 command -v Xwayland >/dev/null || { export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y --no-install-recommends xwayland mesa-utils x11-apps; }
 
@@ -29,7 +29,7 @@ for i in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 0.25; done
 echo "compositor socket up: $SOCK"
 
 echo "== rootful Xwayland :2 as a native Wayland client =="
-Xwayland :2 -rootful -geometry 1280x720 >/tmp/xway-x.log 2>&1 &
+$NV Xwayland :2 -rootful -geometry 1280x720 >/tmp/xway-x.log 2>&1 &
 XPID=$!
 for i in $(seq 1 40); do [ -e /tmp/.X11-unix/X2 ] && break; sleep 0.25; done
 [ -e /tmp/.X11-unix/X2 ] || { echo "FAIL: Xwayland :2 did not start"; tail -n 30 /tmp/xway-x.log; kill "$GSTPID" "$XPID" 2>/dev/null; exit 1; }
@@ -37,7 +37,7 @@ echo "Xwayland up on :2"
 echo "-- Xwayland glamor/EGL init --"; grep -iE "glamor|egl|nvidia|llvmpipe|render|gbm" /tmp/xway-x.log | head -8
 
 echo "== glxgears on :2 (hardware GLX through Xwayland?) =="
-DISPLAY=:2 timeout 9 glxgears -info >/tmp/xway-gears.log 2>&1 &
+DISPLAY=:2 $NV timeout 9 glxgears -info >/tmp/xway-gears.log 2>&1 &
 sleep 7
 grep -iE "GL_RENDERER|GL_VENDOR|FPS" /tmp/xway-gears.log | head -8
 
