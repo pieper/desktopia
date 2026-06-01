@@ -12,21 +12,28 @@ SOCK="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
 unset DISPLAY
 NV="env GBM_BACKEND=nvidia-drm __GLX_VENDOR_LIBRARY_NAME=nvidia __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
 
-echo "== find the NVENC encoder element =="
-ENC=""
-for e in nvh264enc nvcudah264enc nvautogpuh264enc nvv4l2h264enc; do
-  if gst-inspect-1.0 "$e" >/dev/null 2>&1; then ENC="$e"; break; fi
-done
-[ -n "$ENC" ] || { echo "FAIL: no NVENC element found (need gstreamer1.0-plugins-bad + libnvidia-encode)"; gst-inspect-1.0 2>/dev/null | grep -i nvenc; exit 1; }
+# Prefer hardware NVENC; fall back to software x264 (vast hosts often block NVENC sessions).
+echo "== select H.264 encoder (NVENC if usable, else x264) =="
+export DEBIAN_FRONTEND=noninteractive
+command -v gst-inspect-1.0 >/dev/null && gst-inspect-1.0 x264enc >/dev/null 2>&1 || {
+  echo "installing x264/libav gstreamer encoders..."; apt-get update -qq && apt-get install -y --no-install-recommends gstreamer1.0-plugins-ugly gstreamer1.0-libav >/dev/null 2>&1; }
+if gst-inspect-1.0 nvh264enc >/dev/null 2>&1; then
+  ENC="nvh264enc bitrate=8000"
+elif gst-inspect-1.0 x264enc >/dev/null 2>&1; then
+  ENC="x264enc tune=zerolatency speed-preset=ultrafast bitrate=8000 key-int-max=30"
+elif gst-inspect-1.0 avenc_h264 >/dev/null 2>&1; then
+  ENC="avenc_h264 bitrate=8000000"
+else
+  echo "FAIL: no H.264 encoder (need gstreamer1.0-plugins-ugly or -libav)"; exit 1
+fi
 echo "encoder: $ENC"
-gst-inspect-1.0 "$ENC" 2>/dev/null | grep -iE "bitrate|preset|tune|rc-mode|gop|Long-name" | head
 
 OUT=/root/desktopia/test.mp4
 rm -f "$SOCK" "$OUT"
 echo "== compositor -> $ENC -> mp4 (12s) =="
 timeout -s INT 12 gst-launch-1.0 -e -q \
   waylanddisplaysrc ! video/x-raw,width=1280,height=720,format=RGBx,framerate=30/1 \
-  ! videoconvert ! "$ENC" bitrate=8000 ! h264parse ! mp4mux ! filesink location="$OUT" \
+  ! videoconvert ! $ENC ! h264parse ! mp4mux ! filesink location="$OUT" \
   >/tmp/stream-gst.log 2>&1 &
 GSTPID=$!
 for i in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 0.25; done
