@@ -6,6 +6,14 @@ set -uo pipefail
 cd "$(dirname "$0")"
 export DEBIAN_FRONTEND=noninteractive
 
+# --- kill leftovers from a previous/crashed session so this run starts clean ---
+pkill -f session-wayland.sh   2>/dev/null || true
+pkill -f 'server.py --cert'   2>/dev/null || true
+pkill -x Xwayland             2>/dev/null || true
+pkill -x openbox              2>/dev/null || true
+pkill -f '/opt/Slicer-'       2>/dev/null || true
+sleep 1
+
 # --- deps (root) ---
 need=()
 gst-inspect-1.0 x264enc >/dev/null 2>&1 || need+=(gstreamer1.0-plugins-ugly gstreamer1.0-libav)
@@ -24,7 +32,10 @@ python3 -c 'import aioquic' 2>/dev/null || pip3 install --break-system-packages 
 id user >/dev/null 2>&1 || useradd -m -s /bin/bash user
 usermod -aG sudo,video,render,audio user 2>/dev/null || true
 echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/desktopia-user; chmod 440 /etc/sudoers.d/desktopia-user
-chmod o+rx /root /root/desktopia 2>/dev/null || true   # let 'user' read the synced scripts
+
+# --- stage the scripts where 'user' can read them (avoids /root being root-only) ---
+RUN_DIR=/home/user/desktopia
+mkdir -p "$RUN_DIR"; cp -rf "$PWD/." "$RUN_DIR/" 2>/dev/null || true; chown -R user:user "$RUN_DIR"
 
 # --- Chrome: no sign-in prompts / promos (managed policy applies to every launch) ---
 mkdir -p /etc/opt/chrome/policies/managed
@@ -60,7 +71,7 @@ if [ ! -f "$CERT" ] || ! openssl x509 -in "$CERT" -checkend 86400 >/dev/null 2>&
 fi
 chown user:user "$CERT" "$KEY" 2>/dev/null || true
 
-# --- run the session as 'user' (keeps the TTY so make stream / Ctrl-C work) ---
+# --- run the session as 'user' from the staged copy (keeps the TTY for make stream / Ctrl-C) ---
 exec sudo -u user -H \
   DESKTOPIA_PRELOAD="$PRELOAD" DESKTOPIA_CERT="$CERT" DESKTOPIA_KEY="$KEY" \
-  bash "$PWD/session-wayland.sh"
+  bash "$RUN_DIR/session-wayland.sh"
