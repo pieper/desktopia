@@ -42,17 +42,36 @@ for i in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.25; done
 if [ ! -S "$SOCK" ]; then echo "FAIL: compositor socket never appeared. server.log:"; tail -n 40 /tmp/server.log; exit 1; fi
 echo "compositor + QUIC server up (socket $SOCK)"
 
-# --- the desktop: Xwayland + WM + Slicer (clients; need the NVIDIA GBM env) ---
-$NV Xwayland :2 -geometry 1920x1080 >/tmp/xway.log 2>&1 &
+# --- close_range() shim: vast's seccomp denies close_range with EPERM (not ENOSYS), which
+# breaks GLib g_spawn (openbox menu -> "Failed to close file descriptor ... Operation not
+# permitted"). Make close_range report ENOSYS so GLib falls back to its normal fd-close path. ---
+PRELOAD=/tmp/noclose_range.so
+if [ ! -f "$PRELOAD" ] && command -v gcc >/dev/null 2>&1; then
+  printf '%s\n' '#define _GNU_SOURCE' '#include <errno.h>' \
+    'int close_range(unsigned int a, unsigned int b, int c){ (void)a;(void)b;(void)c; errno=ENOSYS; return -1; }' \
+    > /tmp/ncr.c
+  gcc -shared -fPIC -o "$PRELOAD" /tmp/ncr.c 2>/dev/null || true
+fi
+
+# --- X-client environment, inherited by openbox AND every app it launches: hardware GL via
+# the NVIDIA render node + the spawn fix. This makes it a normal GPU desktop. ---
+export GBM_BACKEND=nvidia-drm
+export __GLX_VENDOR_LIBRARY_NAME=nvidia
+export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+[ -f "$PRELOAD" ] && export LD_PRELOAD="$PRELOAD"
+export DISPLAY=:2
+ulimit -n 65536 2>/dev/null || true
+
+Xwayland :2 -geometry 1920x1080 >/tmp/xway.log 2>&1 &
 for i in $(seq 1 40); do [ -e /tmp/.X11-unix/X2 ] && break; sleep 0.25; done
-DISPLAY=:2 openbox >/tmp/wm.log 2>&1 &
+openbox >/tmp/wm.log 2>&1 &
 if [ -n "$SLICER_DIR" ]; then
-  DISPLAY=:2 $NV "$SLICER_DIR/Slicer" --no-splash >/tmp/slicer.log 2>&1 &
+  "$SLICER_DIR/Slicer" --no-splash >/tmp/slicer.log 2>&1 &
   sleep 8
-  DISPLAY=:2 wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz 2>/dev/null || true
+  wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz 2>/dev/null || true
 else
   echo "NOTE: Slicer not found in /opt; run make slicertest once to download it. Showing glxgears."
-  DISPLAY=:2 $NV glxgears >/tmp/glxgears.log 2>&1 &
+  glxgears >/tmp/glxgears.log 2>&1 &
 fi
 
 echo "=================================================================="

@@ -60,12 +60,20 @@ const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
     const move = (x, y) => send(new Uint8Array([1, (x>>8)&255, x&255, (y>>8)&255, y&255]));
     const btn  = b => (b === 0 ? 1 : b === 1 ? 2 : b === 2 ? 3 : 0);   // L/M/R
     let last = 0;
-    canvas.addEventListener('mousemove', ev => {
+    // Pointer Events + setPointerCapture: a drag that ends OUTSIDE the canvas still delivers
+    // pointerup, so we never leave a button stuck down on the server (the "out of sync" bug).
+    canvas.addEventListener('pointermove', ev => {
       const t = performance.now(); if (t - last < 16) return; last = t;   // ~60 Hz
       const [x, y] = toBitmap(ev); move(x, y);
     });
-    canvas.addEventListener('mousedown', ev => { canvas.focus(); const [x,y]=toBitmap(ev); move(x,y); send(new Uint8Array([2, btn(ev.button)])); });
-    canvas.addEventListener('mouseup',   ev => send(new Uint8Array([3, btn(ev.button)])));
+    canvas.addEventListener('pointerdown', ev => {
+      try { canvas.setPointerCapture(ev.pointerId); } catch (_) {}
+      canvas.focus(); const [x,y]=toBitmap(ev); move(x,y); send(new Uint8Array([2, btn(ev.button)]));
+    });
+    canvas.addEventListener('pointerup', ev => {
+      send(new Uint8Array([3, btn(ev.button)]));
+      try { canvas.releasePointerCapture(ev.pointerId); } catch (_) {}
+    });
     canvas.addEventListener('contextmenu', ev => ev.preventDefault());
     canvas.addEventListener('wheel', ev => { ev.preventDefault(); send(new Uint8Array([4, ev.deltaY < 0 ? 0 : 1])); }, { passive: false });
     const KS = { Enter:0xFF0D, Backspace:0xFF08, Tab:0xFF09, Escape:0xFF1B, Delete:0xFFFF,

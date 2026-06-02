@@ -71,6 +71,15 @@ class Injector:
         if kc:
             xtest.fake_input(self.d, X.KeyPress if press else X.KeyRelease, kc); self.d.sync()
 
+    def reset(self):
+        """Release any stuck buttons/modifiers so a reconnect (page reload) recovers cleanly
+        from a drag that ended off-canvas or a key whose release was missed."""
+        for b in (1, 2, 3):
+            self.button(b, False)
+        for ks in (0xFFE1, 0xFFE2, 0xFFE3, 0xFFE4, 0xFFE5,   # Shift_L/R, Control_L/R, Caps_Lock
+                   0xFFE7, 0xFFE8, 0xFFE9, 0xFFEA):           # Meta_L/R, Alt_L/R
+            self.key(ks, False)
+
 
 def encoder_bin():
     """Prefer hardware NVENC; fall back to software x264. Constrain to H.264 High so the
@@ -183,6 +192,7 @@ class StreamProtocol(QuicConnectionProtocol):
                 self._session_id = e.stream_id
                 self._h3.send_headers(e.stream_id, [(b":status", b"200")])
                 self.broadcaster.sessions.add(self)
+                self.injector.reset()                     # clear any stuck buttons/modifiers
                 self.broadcaster.force_keyframe()         # new viewer needs an entry point
                 self.transmit()
                 print("viewer connected; sessions:", len(self.broadcaster.sessions), flush=True)
