@@ -29,13 +29,13 @@ if [ ${#need[@]} -gt 0 ]; then apt-get update -qq; apt-get install -y --no-insta
 python3 -c 'import aioquic' 2>/dev/null || pip3 install --break-system-packages "aioquic>=1.0" >/dev/null 2>&1
 
 # --- unprivileged desktop user with passwordless sudo ---
-id user >/dev/null 2>&1 || useradd -m -s /bin/bash user
+id user >/dev/null 2>&1 || useradd -m -s /bin/bash -U user 2>/dev/null || useradd -m -s /bin/bash user
 usermod -aG sudo,video,render,audio user 2>/dev/null || true
 echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/desktopia-user; chmod 440 /etc/sudoers.d/desktopia-user
 
 # --- stage the scripts where 'user' can read them (avoids /root being root-only) ---
 RUN_DIR=/home/user/desktopia
-mkdir -p "$RUN_DIR"; cp -rf "$PWD/." "$RUN_DIR/" 2>/dev/null || true; chown -R user:user "$RUN_DIR"
+mkdir -p "$RUN_DIR"; cp -rf "$PWD/." "$RUN_DIR/" 2>/dev/null || true; chown -R user "$RUN_DIR"
 
 # --- Chrome: no sign-in prompts / promos (managed policy applies to every launch) ---
 mkdir -p /etc/opt/chrome/policies/managed
@@ -69,7 +69,7 @@ if [ ! -f "$CERT" ] || ! openssl x509 -in "$CERT" -checkend 86400 >/dev/null 2>&
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -keyout "$KEY" -out "$CERT" -days 13 -nodes -subj "/CN=desktopia" 2>/dev/null
 fi
-chown user:user "$CERT" "$KEY" 2>/dev/null || true
+chown user "$CERT" "$KEY" 2>/dev/null || true
 
 # --- run the session as 'user' from the staged copy (keeps the TTY for make stream / Ctrl-C) ---
 exec sudo -u user -H \
