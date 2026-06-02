@@ -48,8 +48,11 @@ cat > ~/.config/openbox/menu.xml <<EOF
 </openbox_menu>
 EOF
 
-Xwayland :2 -geometry 1920x1080 >/tmp/xway.log 2>&1 &
+Xwayland :2 -geometry 1920x1080 >/tmp/xway.log 2>&1 &   # Xwayland IS the compositor's Wayland client
 for i in $(seq 1 40); do [ -e /tmp/.X11-unix/X2 ] && break; sleep 0.25; done
+# From here, everything is a pure X11 client of :2. Unset WAYLAND_DISPLAY so X11 apps (Slicer,
+# Chrome, and esp. wgpu's EGL backend) don't try the Wayland platform and crash (wl_drm BadAccess).
+unset WAYLAND_DISPLAY
 openbox >/tmp/wm.log 2>&1 &
 if [ -n "$SLICER_DIR" ]; then
   "$SLICER_DIR/Slicer" --no-splash >/tmp/slicer.log 2>&1 &
