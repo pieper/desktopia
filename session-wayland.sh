@@ -31,6 +31,7 @@ export __GLX_VENDOR_LIBRARY_NAME=nvidia
 export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
 [ -f "${DESKTOPIA_PRELOAD:-}" ] && export LD_PRELOAD="$DESKTOPIA_PRELOAD"   # close_range g_spawn fix
 export DISPLAY=:2
+export WGPU_BACKEND=vulkan   # SlicerWGPU/wgpu: prefer Vulkan; its GLES/EGL path crashes under XWayland
 ulimit -n 65536 2>/dev/null || true
 
 # --- openbox menu: Terminal, Chrome, Slicer, WM settings (no exit) ---
