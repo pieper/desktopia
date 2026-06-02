@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Desktopia desktop session — runs as the unprivileged 'user' (started by entrypoint-wayland.sh).
+# Brings up the GPU Wayland compositor + H.264/QUIC server, then Xwayland + openbox + Slicer.
+set -uo pipefail
+cd "$(dirname "$0")"
+
+# --- compositor-side env (NOT the NVIDIA GBM env — that is for X clients only) ---
+export LD_LIBRARY_PATH=/usr/local/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}   # libwayland 1.25
+export GST_PLUGIN_PATH=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0:${GST_PLUGIN_PATH:-}
+export GST_REGISTRY_FORK=no
+export XDG_RUNTIME_DIR=/tmp/wl-rt-$(id -u); mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
+export WAYLAND_DISPLAY=wayland-1
+SOCK="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
+SLICER_DIR=$(ls -d /opt/Slicer-*/ 2>/dev/null | head -1)
+CERT=${DESKTOPIA_CERT:-/home/user/desktopia-cert.pem}
+KEY=${DESKTOPIA_KEY:-/home/user/desktopia-key.pem}
+
+cleanup() { kill $(jobs -p) 2>/dev/null; }
+trap cleanup EXIT INT TERM
+
+# --- compositor pipeline + QUIC server ---
+rm -f "$SOCK"
+python3 server.py --cert "$CERT" --key "$KEY" --port 4433 >/tmp/server.log 2>&1 &
+for i in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.25; done
+if [ ! -S "$SOCK" ]; then echo "FAIL: compositor socket never appeared. server.log:"; tail -n 40 /tmp/server.log; exit 1; fi
+echo "compositor + QUIC server up as $(whoami) (socket $SOCK)"
+
+# --- X-client environment, inherited by openbox AND every app it launches ---
+export GBM_BACKEND=nvidia-drm
+export __GLX_VENDOR_LIBRARY_NAME=nvidia
+export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+[ -f "${DESKTOPIA_PRELOAD:-}" ] && export LD_PRELOAD="$DESKTOPIA_PRELOAD"   # close_range g_spawn fix
+export DISPLAY=:2
+ulimit -n 65536 2>/dev/null || true
+
+# --- openbox menu: Terminal, Chrome, Slicer, WM settings (no exit) ---
+mkdir -p ~/.config/openbox
+cat > ~/.config/openbox/menu.xml <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+  <menu id="root-menu" label="Desktopia">
+    <item label="Terminal"><action name="Execute"><command>xterm</command></action></item>
+    <item label="Google Chrome"><action name="Execute"><command>google-chrome --no-sandbox --no-first-run --no-default-browser-check</command></action></item>
+    <item label="3D Slicer"><action name="Execute"><command>$SLICER_DIR/Slicer --no-splash</command></action></item>
+    <separator/>
+    <item label="Window Manager Settings"><action name="Execute"><command>obconf</command></action></item>
+  </menu>
+</openbox_menu>
+EOF
+
+Xwayland :2 -geometry 1920x1080 >/tmp/xway.log 2>&1 &
+for i in $(seq 1 40); do [ -e /tmp/.X11-unix/X2 ] && break; sleep 0.25; done
+openbox >/tmp/wm.log 2>&1 &
+if [ -n "$SLICER_DIR" ]; then
+  "$SLICER_DIR/Slicer" --no-splash >/tmp/slicer.log 2>&1 &
+  sleep 8
+  wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz 2>/dev/null || true
+else
+  echo "NOTE: Slicer not found in /opt; run make slicertest once. Showing glxgears."
+  glxgears >/tmp/glxgears.log 2>&1 &
+fi
+
+echo "=================================================================="
+echo -n "CERT_SHA256_BASE64="
+openssl x509 -in "$CERT" -outform der | openssl dgst -sha256 -binary | base64
+echo "Now: 'make port' for the public IP:PORT, paste both into client/index.html, open in Chrome."
+echo "(logs: /tmp/server.log /tmp/slicer.log /tmp/xway.log)"
+echo "=================================================================="
+wait
