@@ -135,7 +135,7 @@ pip install vastai && vastai set api-key <YOUR_KEY>
 
 make best          # pick a suitable single-GPU offer (an RTX 4090 is ideal)
 make up-best       # rent it
-make provision     # install desktop + streaming dependencies on the machine
+make wl-setup      # build the Wayland compositor on the bare instance (one time)
 make stream        # start the compositor, encoder, QUIC server, desktop, and 3D Slicer
 make port          # print the public address (IP:PORT) the stream is reachable at
 ```
@@ -143,6 +143,10 @@ make port          # print the public address (IP:PORT) the stream is reachable 
 `make stream` also prints a `CERT_SHA256_BASE64=` line (the certificate hash). Paste that hash
 and the `IP:PORT` from `make port` into `client/index.html`, then open that page in a
 Chromium-based browser (served from `localhost` or over HTTPS) to connect to the desktop.
+
+Alternatively, the prebuilt container image (built by CI, with the compositor and 3D Slicer
+already baked in) boots straight into the stream — rent an offer with `make up-ghcr OFFER=<id>`
+and skip `make wl-setup`.
 
 The GPU machine must be launched with these options (the tooling applies them automatically):
 

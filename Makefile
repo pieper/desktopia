@@ -1,6 +1,7 @@
-# Thin wrapper over vast.sh for the dev/test loop. See vast.sh for details.
-.PHONY: search best up up-best up-ghcr ls ssh sync provision run gltest egltest wl-build wl-check wl-fixwayland wltest gametest xwaytest slicertest streamtest pull inspect status logs port stop start down
+# Thin wrapper over vast.sh. See vast.sh for details.
+.PHONY: search best up up-best up-ghcr ls ssh sync wl-build wl-fixwayland wl-setup stream port pull status logs stop start down debug
 
+# --- rent / connect ---
 search:    ; ./vast.sh search
 best:      ; ./vast.sh best
 up:        ; ./vast.sh up $(OFFER)
@@ -9,26 +10,23 @@ up-ghcr:   ; ./vast.sh up $(OFFER) ghcr
 ls:        ; ./vast.sh ls
 ssh:       ; ./vast.sh ssh
 sync:      ; ./vast.sh sync
-provision: ; ./vast.sh provision
-run:       ; ./vast.sh run
-gltest:    ; ./vast.sh gltest
-egltest:   ; ./vast.sh egltest
-wl-build:  ; ./vast.sh wl-build
-wl-check:  ; ./vast.sh wl-check
-wl-fixwayland: ; ./vast.sh wl-fixwayland
-wl-setup:  ; ./vast.sh wl-setup
-wltest:    ; ./vast.sh wltest
-gametest:  ; ./vast.sh gametest
-xwaytest:  ; ./vast.sh xwaytest
-slicertest: ; ./vast.sh slicertest
-streamtest: ; ./vast.sh streamtest
-nvenc-check: ; ./vast.sh nvenc-check
-stream:    ; ./vast.sh stream
+
+# --- build the headless Wayland compositor on a bare instance ---
+wl-build:      ; ./vast.sh wl-build       # gst-wayland-display (Smithay compositor)
+wl-fixwayland: ; ./vast.sh wl-fixwayland  # libwayland >= 1.23 into /usr/local
+wl-setup:      ; ./vast.sh wl-setup       # both of the above, one shot
+
+# --- run + reach the desktop ---
+stream:    ; ./vast.sh stream             # compositor + encoder + QUIC server + desktop
+port:      ; ./vast.sh port               # public IP:PORT for client/index.html
 pull:      ; ./vast.sh pull $(REMOTE) $(LOCAL)
-inspect:   ; ./vast.sh inspect
+
+# --- lifecycle ---
 status:    ; ./vast.sh status
 logs:      ; ./vast.sh logs
-port:      ; ./vast.sh port
 stop:      ; ./vast.sh stop
 start:     ; ./vast.sh start
 down:      ; ./vast.sh down
+
+# --- diagnostics (debug_utils/<name>.sh) ---
+debug:     ; ./vast.sh debug $(SCRIPT)    # e.g. make debug SCRIPT=nvenc-check

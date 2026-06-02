@@ -13,10 +13,8 @@
 <script>
 // Fill these in from the running instance:
 
-//const IP_PORT  = "YOUR_VAST_IP:MAPPED_UDP_PORT";   // from vast.ai "Open Ports"
-const IP_PORT  = "108.55.118.247:46286";   // from vast.ai "Open Ports"
-//const CERT_B64 = "PASTE_CERT_SHA256_BASE64";       // printed by entrypoint.sh
-const CERT_B64 = "2o5bCO0Q9bBExZOnKK0ZZYFXoKSAuMkWpE3eVuzoENI=";       // printed by entrypoint.sh
+const IP_PORT  = "YOUR_VAST_IP:MAPPED_UDP_PORT";   // from `make port` / vast.ai "Open Ports"
+const CERT_B64 = "PASTE_CERT_SHA256_BASE64";       // the CERT_SHA256_BASE64= line printed at startup
 
 const HDR = 9; // u32 frame_id, u8 flags, u16 n_chunks, u16 chunk_idx
 const ctx = document.getElementById('v').getContext('2d');

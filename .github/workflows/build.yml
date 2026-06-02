@@ -5,8 +5,12 @@ on:
     branches: [main]
     paths:
       - "Dockerfile"
-      - "entrypoint.sh"
+      - "entrypoint-wayland.sh"
+      - "session-wayland.sh"
+      - "provision-wayland.sh"
+      - "wl-fixwayland.sh"
       - "server.py"
+      - "client/**"
       - ".github/workflows/build.yml"
   workflow_dispatch:
 

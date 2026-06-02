@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
-# Desktopia <-> vast.ai helper. Drives the vastai CLI for the dev/test loop.
+# Desktopia <-> vast.ai helper. Drives the vastai CLI to rent a GPU, build the compositor,
+# stream the desktop, and tear down.
 #
 #   ./vast.sh search                 # list cheap single-RTX-4090 offers
-#   ./vast.sh up <OFFER_ID> [image]  # create instance (default: CUDA base for Phase-1 debugging)
-#   ./vast.sh up <OFFER_ID> ghcr     # create instance from the built GHCR image (Phase 2)
+#   ./vast.sh best                   # print the single best OFFER_ID
+#   ./vast.sh up <OFFER_ID> [ghcr]   # create instance (default base image; 'ghcr' = built image)
 #   ./vast.sh ls                     # show instances + mapped ports
 #   ./vast.sh ssh                    # ssh into the (first) instance
 #   ./vast.sh sync                   # rsync this repo to /root/desktopia on the instance
-#   ./vast.sh provision              # sync, then install deps (provision.sh) on the instance
-#   ./vast.sh run                    # sync, then run entrypoint.sh on the instance
-#   ./vast.sh gltest                 # sync+provision, then Xorg go/no-go (glxinfo renderer)
+#   ./vast.sh wl-setup               # build the compositor + libwayland on a bare instance
+#   ./vast.sh stream                 # run the desktop + QUIC stream (entrypoint-wayland.sh)
+#   ./vast.sh port                   # print the public IP:PORT mapped to 4433/udp
 #   ./vast.sh status                 # detailed lifecycle state (actual/intended/status_msg)
 #   ./vast.sh logs                   # tail instance logs (shows docker pull progress)
-#   ./vast.sh port                   # print the public IP:PORT mapped to 4433/udp
 #   ./vast.sh stop                   # stop (pause GPU billing, keep disk for a fast restart)
 #   ./vast.sh start                  # restart a stopped instance (seconds if GPU still free)
 #   ./vast.sh down                   # destroy the instance (deletes disk, stops all billing)
+#   ./vast.sh debug <name>           # run debug_utils/<name>.sh on the instance
 #
 # Set DESKTOPIA_INSTANCE to pin a specific id; otherwise the first running one is used.
 set -euo pipefail
@@ -29,9 +30,9 @@ if [ -n "${DESKTOPIA_SSH_KEY:-}" ]; then
   SSH_OPTS="$SSH_OPTS -i ${DESKTOPIA_SSH_KEY/#\~/$HOME} -o IdentitiesOnly=yes"
 fi
 GHCR_IMAGE="ghcr.io/pieper/desktopia:latest"
-# Phase-1 test base. Use a vast.ai-PRE-CACHED image so it loads in seconds, not minutes.
-# (nvidia/cuda:*-ubuntu24.04 exists only for CUDA >=12.5 AND isn't vast-cached -> slow/typo-prone.)
-# This is the same family as the user's existing desktop box; has nvidia-smi/glxinfo/X/ffmpeg.
+# Bare base image for building the compositor on (./vast.sh wl-setup). A vast.ai-PRE-CACHED
+# image loads in seconds, not minutes; it ships nvidia-smi/glxinfo/X/ffmpeg. The built image
+# (GHCR_IMAGE, ./vast.sh up <id> ghcr) instead boots straight into the desktop stream.
 BASE_IMAGE="vastai/linux-desktop:cuda-12.9-ubuntu24.04-2026-05-21"
 ENVOPTS='-p 4433:4433/udp -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE_DEVICES=all'
 # Region matters for interactive latency (motion-to-photon is RTT-bound). Constrain to
@@ -89,39 +90,19 @@ case "$cmd" in
     rsync -av --exclude '.git' --exclude '__pycache__' --exclude '.venv' \
       -e "ssh $SSH_OPTS -p $PORT" ./ "$USER_@$HOST:/root/desktopia/"
     ;;
-  provision) "$0" sync; remote 'cd /root/desktopia && bash provision.sh' ;;
-  run)       "$0" sync; remote 'cd /root/desktopia && bash entrypoint.sh' ;;
-  gltest)    # sharp edge #1 go/no-go: must print an NVIDIA renderer, not llvmpipe
-    "$0" sync; remote 'cd /root/desktopia && bash provision.sh && bash gltest.sh' ;;
-  egltest)   # confirm hardware GL via EGL (no X, no DRM master) -- the clean render path
-    "$0" sync; remote 'cd /root/desktopia && bash egltest.sh' ;;
   wl-build)  # build+install gst-wayland-display (Smithay headless compositor) on the box
     "$0" sync; remote 'cd /root/desktopia && bash provision-wayland.sh' ;;
-  wl-check)  # locate the installed plugin + inspect it (real element name + properties)
-    "$0" sync; remote 'cd /root/desktopia && bash wl-check.sh' ;;
   wl-fixwayland) # build libwayland>=1.23 (distro 1.22 lacks wl_client_set_max_buffer_size)
     "$0" sync; remote 'cd /root/desktopia && bash wl-fixwayland.sh' ;;
-  wl-setup)  # one-shot rebuild-from-scratch on a fresh box: compositor + libwayland 1.25
+  wl-setup)  # one-shot setup on a fresh box: compositor + libwayland 1.25
     "$0" sync; remote 'cd /root/desktopia && bash provision-wayland.sh && bash wl-fixwayland.sh' ;;
-  wltest)    # bring up the compositor + a GL client; confirm NVIDIA renderer + capture frames
-    "$0" sync; remote 'cd /root/desktopia && bash wltest.sh' ;;
-  gametest)  # gamescope nested -> XWayland -> X11 GL app (glxgears); prove the Slicer path
-    "$0" sync; remote 'cd /root/desktopia && bash gametest.sh' ;;
-  xwaytest)  # rootful Xwayland as a direct native client (no nested cage); capture a frame
-    "$0" sync; remote 'cd /root/desktopia && bash xwaytest.sh' ;;
-  slicertest) # run 3D Slicer on rootful Xwayland (the real target) + capture a frame
-    "$0" sync; remote 'cd /root/desktopia && bash slicertest.sh' ;;
-  streamtest) # capture compositor through NVENC to mp4 (de-risk the encoder before QUIC)
-    "$0" sync; remote 'cd /root/desktopia && bash streamtest.sh' ;;
-  nvenc-check) # is hardware NVENC available + why isn't gstreamer nvcodec registering
-    "$0" sync; remote 'cd /root/desktopia && bash nvenc-check.sh' ;;
-  stream)    # THE FINALE: compositor+encode+QUIC server + Xwayland+Slicer; stream to browser
+  stream)    # compositor + encoder + QUIC server + Xwayland + desktop; stream to the browser
     "$0" sync; remote 'cd /root/desktopia && bash entrypoint-wayland.sh' ;;
+  debug)     # run a diagnostic from debug_utils/:  ./vast.sh debug <name>  (e.g. nvenc-check)
+    "$0" sync; remote "cd /root/desktopia && bash debug_utils/${1:?need a debug_utils script name}.sh" ;;
   pull)      # pull a file from the instance: make pull REMOTE=/path [LOCAL=./]
     PORT="" USER_="" HOST=""; read -r PORT USER_ HOST < <(ssh_parts)
     rsync -av -e "ssh $SSH_OPTS -p $PORT" "$USER_@$HOST:${1:?need REMOTE path}" "${2:-./}" ;;
-  inspect)   # probe a vastai/linux-desktop box: display, GL renderer, Selkies, toolchain
-    "$0" sync; remote 'cd /root/desktopia && bash scripts/inspect_desktop.sh' ;;
   status)
     vastai show instance "$(instance_id)" --raw | python3 -c '
 import sys, json

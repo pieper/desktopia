@@ -5,7 +5,7 @@ the CI→registry pipeline, the vast.ai account/key, and the full dev/test loop.
 is ever required — the Mac is arm64, vast.ai hosts are amd64, so all image builds happen in CI.
 
 See `SECURITY.md` for the key-scope / balance / 2FA reasoning referenced below, and `README.md`
-for the architecture and the in-container "sharp edges."
+for the architecture.
 
 ---
 
@@ -35,9 +35,10 @@ empty directory:
 ```bash
 mkdir desktopia && cd desktopia
 git init
-# ... add the files (Dockerfile, entrypoint.sh, server.py, client/index.html,
+# ... add the files (Dockerfile, entrypoint-wayland.sh, session-wayland.sh,
+#     provision-wayland.sh, wl-fixwayland.sh, server.py, client/index.html,
 #     vast.sh, Makefile, .github/workflows/build.yml, README.md, SECURITY.md, SETUP.md,
-#     .gitignore, .dockerignore) ...
+#     debug_utils/, scripts/, .gitignore, .dockerignore) ...
 git add -A && git commit -m "Scaffold Desktopia"
 gh repo create desktopia --private --source=. --remote=origin \
   --description "vast.ai GPU desktop streamed to the browser over QUIC/WebTransport" --push
@@ -47,12 +48,16 @@ Repo layout:
 
 | Path | Role |
 |---|---|
-| `Dockerfile` | Ubuntu 24.04 + GLVND (no host driver) + Xorg + GStreamer/NVENC + aioquic |
-| `entrypoint.sh` | Derive Xorg BusID from `nvidia-smi`, write `xorg.conf`, start X, mint cert, run server |
-| `server.py` | GStreamer appsink → QUIC-datagram fan-out to WebTransport sessions |
+| `Dockerfile` | Ubuntu 24.04 + GLVND + headless Wayland compositor + GStreamer/NVENC + 3D Slicer; bakes the whole stack |
+| `provision-wayland.sh` / `wl-fixwayland.sh` | Build the Smithay compositor (`waylanddisplaysrc`) + libwayland ≥ 1.23 on a bare instance |
+| `entrypoint-wayland.sh` | Container/run entry: install deps, create the desktop user, mint the cert, launch the session |
+| `session-wayland.sh` | Bring up the compositor + QUIC server, then Xwayland, the window manager, and the apps |
+| `server.py` | Headless Wayland compositor capture + H.264 encode → QUIC-datagram fan-out to WebTransport sessions |
 | `client/index.html` | WebTransport + WebCodecs client with the loss handler |
 | `.github/workflows/build.yml` | Build amd64 image in CI, push to GHCR |
-| `vast.sh` / `Makefile` | vast.ai CLI dev-loop wrapper |
+| `vast.sh` / `Makefile` | vast.ai CLI wrapper (rent, build, stream, lifecycle) |
+| `debug_utils/` | Standalone diagnostics (GL/EGL probe, NVENC check, encoder de-risk, compositor inspect) |
+| `scripts/` | Offer ranking + instance/port helpers used by `vast.sh` |
 | `README.md` / `SECURITY.md` / `SETUP.md` | Architecture / threat model / this guide |
 
 ---
@@ -60,8 +65,9 @@ Repo layout:
 ## 2. CI → GHCR image pipeline
 
 The workflow `.github/workflows/build.yml` builds on free amd64 GitHub runners and pushes
-`ghcr.io/pieper/desktopia:latest` (+ a `:<sha>` tag). It triggers on pushes that touch
-`Dockerfile`, `entrypoint.sh`, `server.py`, or the workflow itself, and via manual dispatch:
+`ghcr.io/pieper/desktopia:latest` (+ a `:<sha>` tag). It triggers on pushes that touch the
+`Dockerfile`, the `*-wayland.sh` build/run scripts, `server.py`, `client/`, or the workflow
+itself, and via manual dispatch:
 
 ```bash
 gh workflow run build        # manual trigger
@@ -111,22 +117,21 @@ Billing/Earning Read (never Write), and retry.
 
 ## 4. The dev / test loop
 
-Two phases (full detail in `README.md`). Phase 1 debugs in-container behavior on a stock CUDA
-image without rebuilding; Phase 2 runs the baked GHCR image.
+Two ways to run: build the compositor on a bare instance (fast to iterate, no Docker), or
+launch the prebuilt image that already has it baked in.
 
 ```bash
-# --- Phase 1: interactive debugging on a vast pre-cached desktop image (no Docker) ---
+# --- A. build on a bare vast pre-cached image ---
 make search                 # pick an OFFER_ID (cheapest single RTX 4090 first)
-make up OFFER=<id>          # launch CUDA base + UDP port 4433 + graphics caps
-make ls                     # instance id + status
-make sync                   # rsync the working tree to /root/desktopia
-make ssh                    # shell in; run the apt block, then: bash entrypoint.sh
-                            #   verify: glxinfo | grep renderer  -> "NVIDIA", not "llvmpipe"
-                            #   verify: gst-inspect-1.0 nvh264enc -> confirm property names
+make up OFFER=<id>          # launch the base image + UDP port 4433 + graphics caps
+make wl-setup               # build the Wayland compositor + libwayland (one time per instance)
+make stream                 # run the desktop + QUIC stream
+#   diagnostics if needed:  make debug SCRIPT=egltest      (hardware GL via EGL)
+#                           make debug SCRIPT=nvenc-check   (is NVENC available?)
 
-# --- Phase 2: run the built image ---
+# --- B. launch the prebuilt image (compositor + 3D Slicer already baked) ---
 git push                    # triggers CI -> ghcr.io/pieper/desktopia:latest
-make up-ghcr OFFER=<id>     # launch the GHCR image instead of the CUDA base
+make up-ghcr OFFER=<id>     # launch the GHCR image; it boots straight into the stream
 
 # --- connect the browser ---
 make port                   # public IP:PORT mapped to 4433/udp
@@ -147,7 +152,7 @@ one when several are running.
 Applied automatically by `vast.sh`; here for manual `vastai create instance` use:
 
 ```
---image  vastai/linux-desktop:cuda-12.9-ubuntu24.04-2026-05-21   # Phase 1, vast-cached (or ghcr.io/pieper/desktopia:latest)
+--image  vastai/linux-desktop:cuda-12.9-ubuntu24.04-2026-05-21   # bare base to build on (or ghcr.io/pieper/desktopia:latest)
 --env    '-p 4433:4433/udp -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE_DEVICES=all'
 --disk   40
 --ssh --direct
@@ -156,7 +161,7 @@ Applied automatically by `vast.sh`; here for manual `vastai create instance` use
 - Rent a **single** GPU (multi-GPU triggers NVIDIA enumeration bugs). Prefer **Ada (RTX 4090)** —
   best NVENC; `nvav1enc` available if you switch to AV1.
 - `NVIDIA_DRIVER_CAPABILITIES=all` is **mandatory** — it must include `graphics,display,video`
-  or Xorg/GLX/NVENC silently fail. Never `apt install nvidia-driver-*` in the image; the
+  or GL/EGL/NVENC silently fail. Never `apt install nvidia-driver-*` in the image; the
   Container Toolkit injects matching host libs.
 - `-p 4433:4433/udp` — QUIC is UDP; the `/udp` is required. Read the mapped public port from
   `make port` / the instance's Open Ports panel.

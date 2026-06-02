@@ -59,7 +59,8 @@ if [ -n "$SLICER_DIR" ]; then
   sleep 8
   wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz 2>/dev/null || true
 else
-  echo "NOTE: Slicer not found in /opt; run make slicertest once. Showing glxgears."
+  echo "NOTE: Slicer not found in /opt (the prebuilt image bakes it in; otherwise install it"
+  echo "      into /opt, e.g. 'make debug SCRIPT=slicertest' once). Showing glxgears."
   glxgears >/tmp/glxgears.log 2>&1 &
 fi
 
