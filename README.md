@@ -1,124 +1,170 @@
 # Desktopia
 
-A vast.ai GPU container that renders a desktop (3D Slicer / `glxgears`), hardware-encodes
-it with NVENC, and streams it to a custom web page over **QUIC / WebTransport** — a modern,
-WebRTC-free take on noVNC.
+Desktopia turns a cloud GPU machine into a full Linux desktop that
+you operate from an ordinary web browser tab. A desktop application — by default
+[3D Slicer](https://www.slicer.org/) — renders with real hardware GPU acceleration on the
+server; its screen is encoded as [H.264](https://en.wikipedia.org/wiki/Advanced_Video_Coding)
+video and streamed to a single web page, and your keyboard and mouse travel back the other way
+over the same connection. The result is a low-latency "desktop in a browser tab," in the spirit
+of [noVNC](https://novnc.com/) but built on modern web-streaming technology instead of the
+decades-old [VNC (Virtual Network Computing)](https://en.wikipedia.org/wiki/Virtual_Network_Computing)
+protocol.
 
-> **New here?** [SETUP.md](SETUP.md) replicates everything from scratch (repo, CI→GHCR,
-> vast.ai key, dev loop). [SECURITY.md](SECURITY.md) covers the key scope / spend cap / 2FA model.
+It is meant to run on a rented cloud GPU — it was developed against
+[vast.ai](https://vast.ai/), a marketplace for renting GPU machines by the hour — but nothing
+in the design is tied to a particular host.
 
-## Data path
+## How it works
+
+There are two data paths: video going out to the browser, and input coming back to the desktop.
+
+### Video: server → browser
 
 ```
-GPU (Xorg, hardware GLX) → app renders → ximagesrc capture
-  → nvh264enc (NVENC, intra-refresh, bframes=0, CBR, low-latency)
-  → appsink → Python → fragment into QUIC datagrams
-  → WebTransport (HTTP/3) → browser
-  → reassemble → WebCodecs VideoDecoder → canvas
+3D Slicer and other apps
+  │  draw with hardware OpenGL
+  ▼
+Xwayland  ──hosts the X11 apps──►  headless Wayland compositor   (on the GPU, no monitor)
+                                          │
+                                          ▼
+            GStreamer:  capture the compositor's screen  →  H.264 encode (NVENC, or software)
+                                          │
+                                          ▼
+                          split each video frame into QUIC packets
+                                          │
+                   WebTransport over QUIC ═══ public internet ═══► browser
+                                          │
+                                          ▼
+                 reassemble each frame  →  WebCodecs decoder  →  <canvas> on the page
 ```
 
-## Why this shape
+- The desktop runs on a **headless [Wayland](https://en.wikipedia.org/wiki/Wayland_(protocol))
+  compositor** — a display server that renders entirely on the GPU with no physical monitor
+  attached (built on [Smithay](https://github.com/Smithay/smithay) via
+  [gst-wayland-display](https://github.com/games-on-whales/gst-wayland-display)). It reaches the
+  GPU through a [DRM render node](https://en.wikipedia.org/wiki/Direct_Rendering_Manager#Render_nodes),
+  which needs no special display privileges and **no
+  [VirtualGL](https://www.virtualgl.org/)** (a fragile shim that older remote-3D setups rely on).
+- Traditional X11 applications such as 3D Slicer and Chrome run under
+  **[Xwayland](https://wayland.freedesktop.org/xserver.html)** as clients of that compositor,
+  which gives them hardware **[OpenGL](https://en.wikipedia.org/wiki/GLX)** acceleration.
+- **[GStreamer](https://gstreamer.freedesktop.org/)** (a media-pipeline framework) captures the
+  compositor's output and encodes it to **H.264** using NVIDIA's hardware encoder,
+  [**NVENC**](https://en.wikipedia.org/wiki/Nvidia_NVENC), when the host allows it, or the
+  **x264** software encoder otherwise. ([AV1](https://en.wikipedia.org/wiki/AV1), a newer codec,
+  is available on recent GPUs.)
+- Each encoded frame is split into **[QUIC](https://en.wikipedia.org/wiki/QUIC)** packets and
+  pushed to the browser with the
+  **[WebTransport](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport)** API (which
+  runs over QUIC and [HTTP/3](https://en.wikipedia.org/wiki/HTTP/3)). Unlike an ordinary TCP
+  connection, one lost packet does not stall everything queued behind it
+  ([head-of-line blocking](https://en.wikipedia.org/wiki/Head-of-line_blocking)).
+- The browser reassembles each frame and decodes it with the
+  **[WebCodecs](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API)** API straight
+  into an HTML `<canvas>`, so the page itself controls how much it buffers and how much latency
+  it accepts.
+- **Surviving packet loss.** The encoder uses *intra-refresh*: instead of periodically sending
+  one large, expensive keyframe, it refreshes a slice of the picture every frame. A dropped
+  packet then causes a small, brief smear that heals within a few frames rather than a full
+  freeze. The page notices when a frame is missing and asks for a fresh keyframe only when it
+  truly needs one.
 
-- **WebTransport/QUIC, not WebRTC.** Datagrams (unreliable, UDP-like) carry video; a
-  reliable WT stream is the keyframe-request back-channel. vast.ai's port mapping exposes a
-  direct public `IP:PORT`, so there's **no TURN/coturn/signaling** to run.
-- **Loss resilience is the "custom decoder."** NVENC **intra-refresh** (I-blocks spread
-  across frames, so a dropped datagram doesn't black out the stream) plus a client-side
-  WebCodecs `VideoDecoder` driven manually: reassemble per frame, detect loss when a *later*
-  frame completes first, abandon the broken frame, and request a keyframe only on a delta gap.
-- **GStreamer for encode, not aiortc.** aiortc is pure-Python and can't cleanly inject
-  pre-encoded NALs or hardware-handle RTP/PLI.
-- **Self-signed ECDSA P-256 cert, ≤14-day validity**, pinned client-side via
-  `serverCertificateHashes` — skips needing a domain/CA on ephemeral instances.
-- **GLVND, not Mesa.** Install `libglvnd0`/`libgl1`/`libglx0`/`libegl1` and let the NVIDIA
-  Container Toolkit inject the driver libs. **Never** `apt install nvidia-driver-*`.
+### Input: browser → server
 
-## Files
+Mouse and keyboard events from the canvas are sent back over a reliable WebTransport stream and
+replayed into the desktop as synthetic events (through the X11 *XTEST* extension), so the remote
+applications receive them as ordinary input.
+
+### Connection security
+
+The server presents a short-lived, self-signed
+[TLS (Transport Layer Security)](https://en.wikipedia.org/wiki/Transport_Layer_Security)
+certificate, and the browser trusts it by matching its hash (the WebTransport
+`serverCertificateHashes` option). This avoids needing a domain name or a certificate authority
+for a machine that may only exist for an hour.
+
+## Compared to noVNC and Selkies
+
+Cloud "desktop in a browser" offerings usually ship one of two stacks:
+[**noVNC**](https://novnc.com/) (an HTML5 client for the old VNC protocol) or
+[**Selkies**](https://github.com/selkies-project/selkies) (a
+[**WebRTC**](https://en.wikipedia.org/wiki/WebRTC)-based desktop streamer). Desktopia is a third
+point in the design space, optimized for **low interactive latency on GPU/3D workloads** and for
+being **small enough to modify**.
+
+| | noVNC (+ VNC server) | Selkies (WebRTC) | **Desktopia** |
+|---|---|---|---|
+| **Transport** | Web page ↔ server over **TCP**; one lost packet stalls everything behind it | **WebRTC** over UDP; needs connection negotiation and usually a relay server ([TURN](https://en.wikipedia.org/wiki/Traversal_Using_Relays_around_NAT)) to cross firewalls | **WebTransport over QUIC** (UDP); one public port, no negotiation or relay |
+| **Video** | Framebuffer tile diffs (the VNC protocol), **CPU only** — no hardware video codec | Hardware **NVENC** (H.264/VP8/VP9) | Hardware **H.264 via NVENC** (software x264 fallback) |
+| **Browser decode** | JavaScript paints the framebuffer | Browser's built-in WebRTC player, with a smoothing buffer **you can't tune** | **WebCodecs decoder driven by hand** — the page controls buffering and latency |
+| **Packet loss** | TCP re-sends the data → visible stall | Retransmit requests + smoothing buffer → added latency | **Intra-refresh + custom handler**: skip the damaged frame, request a keyframe only when needed |
+| **Infrastructure** | A VNC server (plus **VirtualGL** for 3D) | A signaling service and often a **TURN relay** | One **UDP port** and a self-signed certificate |
+| **3D / GPU desktop** | Needs VirtualGL (fragile) | GPU desktop with NVENC | **Headless Wayland + Xwayland** → hardware OpenGL, **no VirtualGL** |
+| **Made of** | Fixed VNC protocol | Fixed stack | A small Python server + one HTML page you can modify |
+
+The core idea is **latency and control**: a direct QUIC connection plus a hand-driven WebCodecs
+decoder removes WebRTC's negotiation step and its opaque smoothing buffer, and drops the
+relay/signaling servers entirely — which matters for a short-lived rented machine reached at a
+bare public address. On this path, an interactive CT volume render has run at
+**80–90 frames per second, full-frame, end-to-end in the browser**.
+
+**Honest trade-offs.** Desktopia is experimental and minimal where the others are mature: it
+**falls back to CPU encoding** on hosts that block NVENC, has **no audio or clipboard yet**, and
+requires a **Chromium-based browser** (the WebTransport and WebCodecs APIs are not in Safari and
+only partly in Firefox). noVNC wins on universal browser support; Selkies wins on polish (audio,
+adaptive bitrate, clipboard, years of testing). Reach for Desktopia when you want the lowest
+interactive latency for a GPU/3D workload and a pipeline small enough to change.
+
+## Components
 
 | File | Role |
 |---|---|
-| `Dockerfile` | Ubuntu 24.04 + GLVND + Xorg + GStreamer/NVENC + aioquic |
-| `entrypoint.sh` | Derives Xorg BusID from `nvidia-smi`, writes `xorg.conf`, starts X, mints the cert, launches the server |
-| `server.py` | GStreamer appsink → QUIC-datagram fan-out to WebTransport sessions |
-| `client/index.html` | WebTransport + WebCodecs client with the loss handler |
+| `server.py` | Runs the headless Wayland compositor and GStreamer H.264 encoder, fans each encoded frame out to every connected browser as QUIC packets, and injects incoming keyboard/mouse input into the desktop |
+| `session-wayland.sh` | Brings up the compositor and streaming server, then Xwayland, the [Openbox](http://openbox.org/) window manager, and the apps (terminal, Chrome, 3D Slicer) |
+| `entrypoint-wayland.sh` | Container start-up: installs dependencies, creates the unprivileged desktop user, mints the certificate, then launches the session |
+| `provision-wayland.sh` | Installs the system packages the desktop and streaming pipeline depend on |
+| `client/index.html` | The web page: connects over WebTransport, decodes with WebCodecs, draws to a canvas, and forwards keyboard and mouse input |
 
-## Dev / test loop (no local Docker)
+## Running it
 
-The Mac is arm64; vast.ai hosts are amd64 — so we **never build locally**. Two phases:
-
-**Phase 1 — interactive debugging on vast.ai (no Docker).** Rent a stock CUDA instance, sync
-this repo up, and run the scripts by hand. Seconds per iteration; this is where the X11 /
-GLVND / GStreamer / aioquic sharp edges get resolved.
+You need the [vast.ai command-line tool](https://vast.ai/) and a Chromium-based browser
+(Chrome, Edge, Brave, …).
 
 ```bash
-pip install --user vastai && vastai set api-key <YOUR_KEY>
-make search                 # offers ranked by estimated-latency tier, then price
-make best                   # the single closest-then-cheapest offer id (PCIe >= 23)
-make up-best                # launch that best offer directly (vast pre-cached desktop image)
-make up OFFER=<OFFER_ID>     # or launch a specific offer id
-make ls                     # instance id + status (wait for it to come up)
-make provision              # install deps on the bare instance (runs provision.sh)
-make gltest                 # SHARP EDGE #1 go/no-go: NVIDIA GL context, not llvmpipe
-make run                    # sync + run entrypoint.sh (Xorg + workload + QUIC server)
-make port                   # public IP:PORT mapped to 4433/udp -> paste into client/index.html
-make ssh                    # shell in to poke around by hand
-make down                   # destroy when done (stops billing)
+pip install vastai && vastai set api-key <YOUR_KEY>
+
+make best          # pick a suitable single-GPU offer (an RTX 4090 is ideal)
+make up-best       # rent it
+make provision     # install desktop + streaming dependencies on the machine
+make stream        # start the compositor, encoder, QUIC server, desktop, and 3D Slicer
+make port          # print the public address (IP:PORT) the stream is reachable at
 ```
 
-Deps live in `provision.sh` (a single source of truth shared by the Dockerfile and
-`make provision`), so the Phase-1 debug box and the Phase-2 image never drift. `make gltest`
-is the isolated first test to run after `provision`: it starts an NVIDIA-backed Xorg and
-fails loudly with diagnostics if you get `llvmpipe` (software) instead of a hardware context.
+`make stream` also prints a `CERT_SHA256_BASE64=` line (the certificate hash). Paste that hash
+and the `IP:PORT` from `make port` into `client/index.html`, then open that page in a
+Chromium-based browser (served from `localhost` or over HTTPS) to connect to the desktop.
 
-`search`/`best` estimate each offer's RTT from its `geolocation` (centroid distance to your
-origin), bucket into ~20 ms latency tiers, and prefer the closest tier, then the cheapest
-within it. Origin defaults to Boston — set `DESKTOPIA_ORIGIN="lat,lon"` (e.g. your city) to
-re-rank. Region prefilter is `SEARCH_GEO` (default `geolocation in [US,CA]`). The `~ms` column
-is a model estimate, not a ping — confirm with `mtr`/`ping` once an instance is up.
-
-**Phase 2 — bake into an image via CI.** Once Phase-1 commands work, they're already the
-Dockerfile. Pushing to `main` triggers `.github/workflows/build.yml`, which builds on free
-amd64 GitHub runners and pushes `ghcr.io/pieper/desktopia:latest` (no local Docker). Then:
-
-```bash
-make up-ghcr OFFER=<OFFER_ID>   # launch the built image instead of the CUDA base
-```
-
-vast.ai launch options (already applied by `vast.sh`):
+The GPU machine must be launched with these options (the tooling applies them automatically):
 
 ```
--e NVIDIA_DRIVER_CAPABILITIES=all     # MUST include graphics,display,video,compute
+-p 4433:4433/udp                      # QUIC is UDP — the /udp suffix is required
+-e NVIDIA_DRIVER_CAPABILITIES=all     # must include graphics, display, video, compute
 -e NVIDIA_VISIBLE_DEVICES=all
--p 4433:4433/udp                      # QUIC is UDP — the /udp is mandatory
 ```
 
-Rent a **single** Ada GPU (RTX 4090) — best NVENC, and `nvav1enc` is available if you switch
-to AV1. From the boot logs, copy the `CERT_SHA256_BASE64=` line and `make port` into
-`client/index.html`, then open it in Chromium (WebTransport + WebCodecs are Chromium-only
-today). Serve the page from `localhost` or HTTPS.
+When you are finished, `make down` destroys the machine and stops billing.
 
-## Sharp edges — verify before trusting it
+## Requirements and limitations
 
-1. **Xorg-in-container is the #1 go/no-go.** It needs a VT and device access; some vast.ai
-   hosts won't allow it without privilege. Fallbacks: (a) headless **Wayland** (`cage`/wlroots)
-   + `pipewiresrc`/dmabuf capture — the future-proof, zero-copy-on-UMA path; (b) **EGL
-   offscreen** if you only need render→encode and not an interactive desktop (then the app
-   must render into a surface you capture via GL/CUDA interop — `ximagesrc` has nothing to grab).
-2. **`nvh264enc` property names drift** across nvcodec versions (`nvh264enc` vs
-   `nvcudah264enc`/`nvautogpuh264enc`; `tune`/`rc-mode`/`gop-size` naming). Run
-   `gst-inspect-1.0 nvh264enc` on the actual image and adjust `PIPELINE` in `server.py`.
-3. **aioquic's WebTransport datagram/session API is version-sensitive.** `send_datagram(session_id, …)`
-   and the H3 WT events may need tweaking against the installed version's `webtransport`
-   example. Test a trivial datagram echo first; the fragmentation/fan-out logic is stable.
-4. **The capture is a GPU→CPU→GPU readback** (`ximagesrc`) — fine at 1080p/1440p60, becomes
-   the bottleneck at 4K60. The dmabuf/PipeWire fallback removes it on coherent hardware.
-5. **`max_datagram_frame_size`** must be negotiated (set in `server.py`) or datagrams
-   silently won't send; keep chunk size ≤ ~1100 B regardless.
+- **GPU:** a single NVIDIA GPU; an Ada-generation card (e.g. RTX 4090) gives the best hardware
+  encoding and also supports AV1.
+- **Browser:** Chromium-based only — the WebTransport and WebCodecs APIs are not available in
+  Safari and only partially in Firefox.
+- **Encoding:** some hosts block NVENC, in which case the pipeline falls back to slower CPU
+  (x264) encoding.
+- **Not yet implemented:** audio and clipboard sharing.
 
-## Roadmap
+## See also
 
-- [ ] PoC 1 — prove Xorg + hardware GLX in a vast.ai container (`glxinfo` shows NVIDIA, not llvmpipe)
-- [ ] PoC 2 — datagram echo over WebTransport (validate aioquic API surface)
-- [ ] PoC 3 — full pipeline with `glxgears`, then swap in 3D Slicer
-- [ ] dmabuf/PipeWire capture variant (kills the readback; vendor-neutral via VA-API)
-- [ ] MCP / slicer-skill agent tool surface wired into the session
+- [SECURITY.md](SECURITY.md) — certificate/key handling and the access model.
+- [SETUP.md](SETUP.md) — reproducing the container image from scratch.
