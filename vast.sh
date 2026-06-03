@@ -75,9 +75,17 @@ case "$cmd" in
   up-best) "$0" up "$("$0" best)" "${1:-base}" ;;
   up)
     offer=${1:?need OFFER_ID}; sel=${2:-base}
-    img=$BASE_IMAGE; [ "$sel" = "ghcr" ] && img=$GHCR_IMAGE
-    echo "launching $img on offer $offer"
-    vastai create instance "$offer" --image "$img" --env "$ENVOPTS" --disk 40 --ssh --direct
+    if [ "$sel" = "ghcr" ]; then
+      # vast ssh-mode discards the image ENTRYPOINT, so launch our baked stack via an onstart that
+      # backgrounds it (vast's own sshd/portal keep running alongside; entrypoint fixes ssh perms,
+      # fetches Slicer, and starts the compositor+QUIC stream).
+      echo "launching $GHCR_IMAGE on offer $offer (ssh-mode + onstart)"
+      vastai create instance "$offer" --image "$GHCR_IMAGE" --env "$ENVOPTS" --disk 40 --ssh --direct \
+        --onstart-cmd 'setsid bash /opt/desktopia/entrypoint-wayland.sh >/var/log/desktopia.log 2>&1 </dev/null &'
+    else
+      echo "launching $BASE_IMAGE on offer $offer"
+      vastai create instance "$offer" --image "$BASE_IMAGE" --env "$ENVOPTS" --disk 40 --ssh --direct
+    fi
     ;;
   ls|list) vastai show instances-v1 ;;
   url)  vastai ssh-url "$(instance_id)" ;;

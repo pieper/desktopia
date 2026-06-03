@@ -6,6 +6,15 @@ set -uo pipefail
 cd "$(dirname "$0")"
 export DEBIAN_FRONTEND=noninteractive
 
+# --- vast ssh-mode (onstart): vast injects our SSH key into /root/.ssh, but some bases leave it
+# with perms sshd refuses ("bad ownership or modes for /root/.ssh/authorized_keys"). Fix it
+# repeatedly for the first minute (vast may write the key slightly after onstart begins). No-op in
+# the dev flow / where /root/.ssh is absent. ---
+( for _ in $(seq 1 20); do
+    [ -d /root/.ssh ] && { chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys; chmod go-w /root; } 2>/dev/null
+    sleep 3
+  done ) &
+
 # --- kill leftovers from a previous/crashed session so this run starts clean ---
 pkill -f session-wayland.sh   2>/dev/null || true
 pkill -f 'server.py --cert'   2>/dev/null || true
@@ -60,6 +69,15 @@ if [ ! -f "$PRELOAD" ] && command -v gcc >/dev/null 2>&1; then
   printf '%s\n' '#define _GNU_SOURCE' '#include <errno.h>' \
     'int close_range(unsigned int a, unsigned int b, int c){ (void)a;(void)b;(void)c; errno=ENOSYS; return -1; }' > /tmp/ncr.c
   gcc -shared -fPIC -o "$PRELOAD" /tmp/ncr.c 2>/dev/null || true
+fi
+
+# --- 3D Slicer on demand: the image doesn't bake it (it's a ~5 s download). Fetch into /opt
+# (where session-wayland.sh looks for it) if absent; the curl|tar pipe overlaps download+extract. ---
+if ! ls -d /opt/Slicer-*/ >/dev/null 2>&1; then
+  echo "fetching 3D Slicer..."
+  mkdir -p /opt
+  curl -L --retry 3 "https://download.slicer.org/download?os=linux&stability=release" \
+    | tar -xz -C /opt 2>/dev/null || echo "Slicer fetch failed (session will show glxgears)"
 fi
 
 # --- persistent WebTransport cert (ECDSA P-256, <=14d). Migrate the old /root cert so the
