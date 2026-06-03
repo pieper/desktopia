@@ -38,7 +38,9 @@ cargo cinstall --prefix=/usr/local
 ldconfig
 
 echo "== verify the element is registered =="
-export GST_PLUGIN_PATH=/usr/local/lib/gstreamer-1.0
+# cargo cinstall installs into the multiarch libdir on Debian/Ubuntu; include both layouts so
+# this matches the runtime GST_PLUGIN_PATH (session-wayland.sh / wl-fixwayland.sh).
+export GST_PLUGIN_PATH=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0:/usr/local/lib/gstreamer-1.0
 gst-inspect-1.0 waylanddisplaysrc | sed -n '1,25p' \
   || { echo "FAIL: waylanddisplaysrc not found — check GST_PLUGIN_PATH and the build log"; exit 1; }
 echo "provision-wayland.sh: done — waylanddisplaysrc is available"
