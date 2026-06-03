@@ -173,3 +173,7 @@ When you are finished, `make down` destroys the machine and stops billing.
 - [BACKENDS.md](BACKENDS.md) — running the image on other GPU backends (AWS, GCP, Azure, GPU‑rental clouds, local) and how to test each.
 - [SECURITY.md](SECURITY.md) — certificate/key handling and the access model.
 - [SETUP.md](SETUP.md) — reproducing the container image from scratch.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).
