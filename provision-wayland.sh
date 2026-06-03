@@ -37,10 +37,12 @@ cd "$SRC"
 cargo cinstall --prefix=/usr/local
 ldconfig
 
-echo "== verify the element is registered =="
-# cargo cinstall installs into the multiarch libdir on Debian/Ubuntu; include both layouts so
-# this matches the runtime GST_PLUGIN_PATH (session-wayland.sh / wl-fixwayland.sh).
-export GST_PLUGIN_PATH=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0:/usr/local/lib/gstreamer-1.0
-gst-inspect-1.0 waylanddisplaysrc | sed -n '1,25p' \
-  || { echo "FAIL: waylanddisplaysrc not found — check GST_PLUGIN_PATH and the build log"; exit 1; }
-echo "provision-wayland.sh: done — waylanddisplaysrc is available"
+echo "== verify the plugin built =="
+# Do NOT gst-inspect the plugin here: it needs libwayland >= 1.23 (symbol
+# wl_client_set_max_buffer_size), which wl-fixwayland.sh installs AFTER this script. Loading it
+# now against the distro's libwayland 1.22 fails symbol resolution AND blacklists the plugin in
+# the GStreamer registry. Just confirm cargo cinstall produced the .so; wl-fixwayland.sh does the
+# real load test once the newer libwayland is in place.
+SO=$(find /usr/local -name 'libgstwaylanddisplaysrc.so' 2>/dev/null | head -1)
+[ -n "$SO" ] || { echo "FAIL: libgstwaylanddisplaysrc.so not found after cargo cinstall"; exit 1; }
+echo "provision-wayland.sh: done — built $SO (run wl-fixwayland.sh next for the libwayland it needs)"
