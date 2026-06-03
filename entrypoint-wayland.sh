@@ -21,7 +21,6 @@ command -v openbox       >/dev/null 2>&1 || need+=(openbox)
 command -v wmctrl        >/dev/null 2>&1 || need+=(wmctrl)
 command -v xterm         >/dev/null 2>&1 || need+=(xterm)
 command -v obconf        >/dev/null 2>&1 || need+=(obconf)
-command -v google-chrome >/dev/null 2>&1 || need+=(google-chrome-stable)
 command -v vulkaninfo    >/dev/null 2>&1 || need+=(vulkan-tools libvulkan1)
 command -v sudo          >/dev/null 2>&1 || need+=(sudo)
 command -v gcc           >/dev/null 2>&1 || need+=(gcc)
@@ -31,7 +30,10 @@ python3 -c 'import aioquic' 2>/dev/null || pip3 install --break-system-packages 
 
 # --- unprivileged desktop user with passwordless sudo ---
 id user >/dev/null 2>&1 || useradd -m -s /bin/bash -U user 2>/dev/null || useradd -m -s /bin/bash user
-usermod -aG sudo,video,render,audio user 2>/dev/null || true
+# The GPU render node's group varies per host (render / video / netdev on vast); add 'user' to
+# whatever group actually owns it, or the headless compositor can't open it (empty DMA formats).
+RNODE_GRPS=$(ls /dev/dri/renderD* 2>/dev/null | xargs -r -n1 stat -c %G 2>/dev/null | sort -u | paste -sd, -)
+usermod -aG "sudo,video,render,audio${RNODE_GRPS:+,$RNODE_GRPS}" user 2>/dev/null || true
 echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/desktopia-user; chmod 440 /etc/sudoers.d/desktopia-user
 
 # --- stage the scripts where 'user' can read them (avoids /root being root-only) ---

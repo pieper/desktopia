@@ -91,8 +91,19 @@ def encoder_bin():
             f"key-int-max={FPS} ! {caps}")
 
 
+def render_node():
+    """waylanddisplaysrc defaults to /dev/dri/renderD128, but the GPU's render node varies per
+    host -- on vast it can be renderD129/130 when the GPU isn't card0. Pick the one present, or
+    the compositor opens a nonexistent node and reports 'Supported DMA formats: []' and never
+    creates its Wayland socket."""
+    import glob
+    nodes = sorted(glob.glob("/dev/dri/renderD*"))
+    return nodes[0] if nodes else "/dev/dri/renderD128"
+
+
 PIPELINE = (
-    f"waylanddisplaysrc ! video/x-raw,width={W},height={H},format=RGBx,framerate={FPS}/1 "
+    f"waylanddisplaysrc render-node={render_node()} "
+    f"! video/x-raw,width={W},height={H},format=RGBx,framerate={FPS}/1 "
     f"! videoconvert ! {encoder_bin()} "
     "! appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true"
 )
