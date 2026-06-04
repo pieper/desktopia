@@ -2,138 +2,155 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Desktopia — WebTransport / WebCodecs client</title>
+<title>Desktopia — 3D Slicer</title>
 <style>
-  body { margin: 0; background: #111; }
-  #v { width: 100vw; height: 100vh; object-fit: contain; }
+  body { margin: 0; background: #15151f; color: #d8d8e0;
+         font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
+  #v { width: 100vw; height: 100vh; object-fit: contain; display: block; background: #15151f; }
+  #overlay { position: fixed; inset: 0; display: flex; flex-direction: column;
+             align-items: center; justify-content: center; gap: 20px; background: #15151f; }
+  #overlay.hidden { display: none; }
+  #phase { font-size: 26px; font-weight: 600; }
+  #log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+         line-height: 1.4; color: #7a7a92; max-width: 80vw; max-height: 34vh; overflow: hidden;
+         white-space: pre-wrap; text-align: left; }
+  .spinner { width: 42px; height: 42px; border: 4px solid #2c2c3a; border-top-color: #6cc6ff;
+             border-radius: 50%; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
 <canvas id="v" width="1920" height="1080"></canvas>
+<div id="overlay">
+  <div class="spinner"></div>
+  <div id="phase">Starting…</div>
+  <pre id="log"></pre>
+</div>
 <script>
-// Fill these in from the running instance:
-
-const IP_PORT  = "YOUR_VAST_IP:MAPPED_UDP_PORT";   // from `make port` / vast.ai "Open Ports"
-const CERT_B64 = "PASTE_CERT_SHA256_BASE64";       // the CERT_SHA256_BASE64= line printed at startup
-
 const HDR = 9; // u32 frame_id, u8 flags, u16 n_chunks, u16 chunk_idx
 const ctx = document.getElementById('v').getContext('2d');
-
-const decoder = new VideoDecoder({
-  output: f => { ctx.drawImage(f, 0, 0, 1920, 1080); f.close(); },
-  error: e => { console.warn("decode", e); needKey(); }
-});
-// No `description` => decoder expects Annex-B (matches stream-format=byte-stream)
-decoder.configure({ codec: "avc1.640028", optimizeForLatency: true });
-
+const overlay = document.getElementById('overlay');
+const phaseEl = document.getElementById('phase');
+const logEl = document.getElementById('log');
 const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+let requestKey = () => {};   // set once the input channel is open; called by the decoder on loss
 
-(async () => {
-  const wt = new WebTransport(`https://${IP_PORT}/stream`, {
-    serverCertificateHashes: [{ algorithm: "sha-256", value: b64(CERT_B64) }]
-  });
-  await wt.ready;
-
-  // One reliable client->server stream carries keyframe requests AND input events.
-  const inW = (await wt.createUnidirectionalStream()).getWriter();
-  console.log("input channel open");
-  let sent = 0;
-  const send = a => { sent++; if (sent <= 3 || sent % 200 === 0) console.log("sent", sent, "type", a[0]);
-                      return inW.write(a).catch(e => console.warn("send fail", e)); };
-  function needKey() { send(new Uint8Array([0x00])); }   // type 0 = keyframe request
-  window.needKey = needKey;
-  setupInput(send);
-
-  function setupInput(send) {
-    const canvas = document.getElementById('v');
-    canvas.tabIndex = 0; canvas.focus();
-    const toBitmap = ev => {                    // map CSS coords -> 1920x1080 (object-fit: contain)
-      const r = canvas.getBoundingClientRect();
-      const s = Math.min(r.width / 1920, r.height / 1080);
-      const ox = (r.width - 1920 * s) / 2, oy = (r.height - 1080 * s) / 2;
-      const x = Math.max(0, Math.min(1919, Math.round((ev.clientX - r.left - ox) / s)));
-      const y = Math.max(0, Math.min(1079, Math.round((ev.clientY - r.top  - oy) / s)));
-      return [x, y];
-    };
-    const move = (x, y) => send(new Uint8Array([1, (x>>8)&255, x&255, (y>>8)&255, y&255]));
-    const btn  = b => (b === 0 ? 1 : b === 1 ? 2 : b === 2 ? 3 : 0);   // L/M/R
-    let last = 0;
-    // Pointer Events + setPointerCapture: a drag that ends OUTSIDE the canvas still delivers
-    // pointerup, so we never leave a button stuck down on the server (the "out of sync" bug).
-    canvas.addEventListener('pointermove', ev => {
-      const t = performance.now(); if (t - last < 16) return; last = t;   // ~60 Hz
-      const [x, y] = toBitmap(ev); move(x, y);
-    });
-    canvas.addEventListener('pointerdown', ev => {
-      try { canvas.setPointerCapture(ev.pointerId); } catch (_) {}
-      canvas.focus(); const [x,y]=toBitmap(ev); move(x,y); send(new Uint8Array([2, btn(ev.button)]));
-    });
-    canvas.addEventListener('pointerup', ev => {
-      send(new Uint8Array([3, btn(ev.button)]));
-      try { canvas.releasePointerCapture(ev.pointerId); } catch (_) {}
-    });
-    canvas.addEventListener('contextmenu', ev => ev.preventDefault());
-    canvas.addEventListener('wheel', ev => { ev.preventDefault(); send(new Uint8Array([4, ev.deltaY < 0 ? 0 : 1])); }, { passive: false });
-    const KS = { Enter:0xFF0D, Backspace:0xFF08, Tab:0xFF09, Escape:0xFF1B, Delete:0xFFFF,
-      ArrowLeft:0xFF51, ArrowUp:0xFF52, ArrowRight:0xFF53, ArrowDown:0xFF54,
-      Home:0xFF50, End:0xFF57, PageUp:0xFF55, PageDown:0xFF56, Insert:0xFF63,
-      Shift:0xFFE1, Control:0xFFE3, Alt:0xFFE9, Meta:0xFFE7, CapsLock:0xFFE5, ' ':0x20 };
-    const keysym = ev => {
-      if (ev.key in KS) return KS[ev.key];
-      if (ev.key.length === 1) return ev.key.charCodeAt(0);
-      const m = /^F(\d+)$/.exec(ev.key); return m ? 0xFFBE + (+m[1] - 1) : 0;
-    };
-    window.addEventListener('keydown', ev => { const k = keysym(ev); if (k) { ev.preventDefault(); send(new Uint8Array([5, (k>>8)&255, k&255])); } });
-    window.addEventListener('keyup',   ev => { const k = keysym(ev); if (k) { ev.preventDefault(); send(new Uint8Array([6, (k>>8)&255, k&255])); } });
+// ---- Phase 1: poll the launcher's status.json until the stream is ready, showing boot progress ----
+async function poll() {
+  let s = null;
+  try { const r = await fetch('status.json?t=' + Date.now(), { cache: 'no-store' }); if (r.ok) s = await r.json(); }
+  catch (e) {}
+  if (s) {
+    phaseEl.textContent = s.phase || '…';
+    logEl.textContent = s.log || '';
+    if (s.ready && s.ip_port && s.cert) { connect(s.ip_port, s.cert); return; }
+  } else {
+    phaseEl.textContent = 'waiting for launcher…';
   }
+  setTimeout(poll, 1000);
+}
 
-  const partial = new Map();           // frame_id -> {parts:[], have, n, key}
-  let ts = 0, haveKey = false, lastDone = -1;
+// ---- Phase 2: connect the WebTransport / WebCodecs stream; hide the overlay on the first frame ----
+function connect(IP_PORT, CERT_B64) {
+  phaseEl.textContent = 'Connecting to stream…';
+  let firstFrame = false;
+  const decoder = new VideoDecoder({
+    output: f => { if (!firstFrame) { firstFrame = true; overlay.classList.add('hidden'); }
+                   ctx.drawImage(f, 0, 0, 1920, 1080); f.close(); },
+    error: e => { console.warn("decode", e); requestKey(); }
+  });
+  // No `description` => decoder expects Annex-B (matches stream-format=byte-stream)
+  decoder.configure({ codec: "avc1.640028", optimizeForLatency: true });
 
-  function onDatagram(buf) {
-    const dv = new DataView(buf.buffer, buf.byteOffset);
-    const fid = dv.getUint32(0), flags = dv.getUint8(4);
-    const n = dv.getUint16(5), idx = dv.getUint16(7);
-    const isKey = (flags & 1) === 1;
-    const body = new Uint8Array(buf.buffer, buf.byteOffset + HDR);
+  (async () => {
+    const wt = new WebTransport(`https://${IP_PORT}/stream`, {
+      serverCertificateHashes: [{ algorithm: "sha-256", value: b64(CERT_B64) }]
+    });
+    await wt.ready;
 
-    // Drop late chunks for a frame we've already moved past.
-    if (fid <= lastDone) return;
+    // One reliable client->server stream carries keyframe requests AND input events.
+    const inW = (await wt.createUnidirectionalStream()).getWriter();
+    const send = a => inW.write(a).catch(e => console.warn("send fail", e));
+    function needKey() { send(new Uint8Array([0x00])); }   // type 0 = keyframe request
+    requestKey = needKey;
+    setupInput(send);
 
-    let f = partial.get(fid);
-    if (!f) { f = { parts: new Array(n), have: 0, n, key: isKey }; partial.set(fid, f); }
-    if (!f.parts[idx]) { f.parts[idx] = body; f.have++; }
+    function setupInput(send) {
+      const canvas = document.getElementById('v');
+      canvas.tabIndex = 0; canvas.focus();
+      const toBitmap = ev => {                    // map CSS coords -> 1920x1080 (object-fit: contain)
+        const r = canvas.getBoundingClientRect();
+        const s = Math.min(r.width / 1920, r.height / 1080);
+        const ox = (r.width - 1920 * s) / 2, oy = (r.height - 1080 * s) / 2;
+        const x = Math.max(0, Math.min(1919, Math.round((ev.clientX - r.left - ox) / s)));
+        const y = Math.max(0, Math.min(1079, Math.round((ev.clientY - r.top  - oy) / s)));
+        return [x, y];
+      };
+      const move = (x, y) => send(new Uint8Array([1, (x>>8)&255, x&255, (y>>8)&255, y&255]));
+      const btn  = b => (b === 0 ? 1 : b === 1 ? 2 : b === 2 ? 3 : 0);   // L/M/R
+      let last = 0;
+      canvas.addEventListener('pointermove', ev => {
+        const t = performance.now(); if (t - last < 16) return; last = t;   // ~60 Hz
+        const [x, y] = toBitmap(ev); move(x, y);
+      });
+      canvas.addEventListener('pointerdown', ev => {
+        try { canvas.setPointerCapture(ev.pointerId); } catch (_) {}
+        canvas.focus(); const [x,y]=toBitmap(ev); move(x,y); send(new Uint8Array([2, btn(ev.button)]));
+      });
+      canvas.addEventListener('pointerup', ev => {
+        send(new Uint8Array([3, btn(ev.button)]));
+        try { canvas.releasePointerCapture(ev.pointerId); } catch (_) {}
+      });
+      canvas.addEventListener('contextmenu', ev => ev.preventDefault());
+      canvas.addEventListener('wheel', ev => { ev.preventDefault(); send(new Uint8Array([4, ev.deltaY < 0 ? 0 : 1])); }, { passive: false });
+      const KS = { Enter:0xFF0D, Backspace:0xFF08, Tab:0xFF09, Escape:0xFF1B, Delete:0xFFFF,
+        ArrowLeft:0xFF51, ArrowUp:0xFF52, ArrowRight:0xFF53, ArrowDown:0xFF54,
+        Home:0xFF50, End:0xFF57, PageUp:0xFF55, PageDown:0xFF56, Insert:0xFF63,
+        Shift:0xFFE1, Control:0xFFE3, Alt:0xFFE9, Meta:0xFFE7, CapsLock:0xFFE5, ' ':0x20 };
+      const keysym = ev => {
+        if (ev.key in KS) return KS[ev.key];
+        if (ev.key.length === 1) return ev.key.charCodeAt(0);
+        const m = /^F(\d+)$/.exec(ev.key); return m ? 0xFFBE + (+m[1] - 1) : 0;
+      };
+      window.addEventListener('keydown', ev => { const k = keysym(ev); if (k) { ev.preventDefault(); send(new Uint8Array([5, (k>>8)&255, k&255])); } });
+      window.addEventListener('keyup',   ev => { const k = keysym(ev); if (k) { ev.preventDefault(); send(new Uint8Array([6, (k>>8)&255, k&255])); } });
+    }
 
-    if (f.have === f.n) decodeFrame(fid, f);
+    const partial = new Map();           // frame_id -> {parts:[], have, n, key}
+    let ts = 0, haveKey = false, lastDone = -1;
 
-    // Loss detection: a higher frame completed first => this one lost a chunk. Abandon it.
-    for (const [oid, of] of partial) {
-      if (oid < fid && of.have < of.n) {
-        partial.delete(oid);
-        if (!of.key) haveKey && needKey();   // a delta gap => resync to next keyframe
+    function onDatagram(buf) {
+      const dv = new DataView(buf.buffer, buf.byteOffset);
+      const fid = dv.getUint32(0), flags = dv.getUint8(4);
+      const n = dv.getUint16(5), idx = dv.getUint16(7);
+      const isKey = (flags & 1) === 1;
+      const body = new Uint8Array(buf.buffer, buf.byteOffset + HDR);
+      if (fid <= lastDone) return;                       // drop late chunks for a passed frame
+      let f = partial.get(fid);
+      if (!f) { f = { parts: new Array(n), have: 0, n, key: isKey }; partial.set(fid, f); }
+      if (!f.parts[idx]) { f.parts[idx] = body; f.have++; }
+      if (f.have === f.n) decodeFrame(fid, f);
+      for (const [oid, of] of partial) {                 // loss: a later frame completed first
+        if (oid < fid && of.have < of.n) { partial.delete(oid); if (!of.key) haveKey && needKey(); }
       }
     }
-  }
+    function decodeFrame(fid, f) {
+      partial.delete(fid); lastDone = fid;
+      if (!haveKey && !f.key) { needKey(); return; }     // wait for an entry point
+      if (f.key) haveKey = true;
+      const data = new Uint8Array(f.parts.reduce((a, p) => a + p.length, 0));
+      let o = 0; for (const p of f.parts) { data.set(p, o); o += p.length; }
+      decoder.decode(new EncodedVideoChunk({ type: f.key ? "key" : "delta", timestamp: ts, data }));
+      ts += 1e6 / 60;
+    }
 
-  function decodeFrame(fid, f) {
-    partial.delete(fid); lastDone = fid;
-    if (!haveKey && !f.key) { needKey(); return; }   // wait for an entry point
-    if (f.key) haveKey = true;
-    const data = new Uint8Array(f.parts.reduce((a, p) => a + p.length, 0));
-    let o = 0; for (const p of f.parts) { data.set(p, o); o += p.length; }
-    decoder.decode(new EncodedVideoChunk({
-      type: f.key ? "key" : "delta", timestamp: ts, data
-    }));
-    ts += 1e6 / 60;
-  }
+    const reader = wt.datagrams.readable.getReader();
+    while (true) { const { value, done } = await reader.read(); if (done) break; onDatagram(value); }
+  })().catch(e => { phaseEl.textContent = 'connection failed — retrying…'; logEl.textContent = String(e);
+                    overlay.classList.remove('hidden'); setTimeout(poll, 1500); });
+}
 
-  const reader = wt.datagrams.readable.getReader();
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    onDatagram(value);
-  }
-})();
+poll();
 </script>
 </body>
 </html>

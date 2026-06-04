@@ -7,3 +7,6 @@ __pycache__/
 *.swo
 *~
 *.un~
+
+# runtime launcher status
+client/status.json

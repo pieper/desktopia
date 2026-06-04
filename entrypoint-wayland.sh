@@ -39,7 +39,12 @@ python3 -c 'import Xlib'  2>/dev/null     || need+=(python3-xlib)
 python3 -c 'import gi; gi.require_version("Gst","1.0")' 2>/dev/null || need+=(python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0)
 gst-inspect-1.0 videoconvert >/dev/null 2>&1 || need+=(gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-tools gstreamer1.0-x)
 need+=(libgbm1 libdrm2 libinput10 libseat1 libxkbcommon0 libdisplay-info-dev libegl1 libgles2)
-if [ ${#need[@]} -gt 0 ]; then apt-get update -qq; apt-get install -y --no-install-recommends "${need[@]}" >/dev/null 2>&1; fi
+# Install straight from the base image's existing package lists (fast); only fall back to a slow
+# `apt-get update` if that fails (stale/cleaned lists). The vast base's lists are usually fresh.
+if [ ${#need[@]} -gt 0 ]; then
+  apt-get install -y --no-install-recommends "${need[@]}" >/dev/null 2>&1 \
+    || { apt-get update -qq && apt-get install -y --no-install-recommends "${need[@]}" >/dev/null 2>&1; }
+fi
 python3 -c 'import aioquic' 2>/dev/null || pip3 install --break-system-packages "aioquic>=1.0" >/dev/null 2>&1
 
 # --- prebuilt compositor: fetch + extract the gst-wayland-display plugin + libwayland (~10 MB) from
