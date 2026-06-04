@@ -55,22 +55,20 @@ for i in $(seq 1 40); do [ -e /tmp/.X11-unix/X2 ] && break; sleep 0.25; done
 unset WAYLAND_DISPLAY
 openbox >/tmp/wm.log 2>&1 &
 
-# --- loading splash: the Slicer logo + "please wait" on the X root, shown the instant the desktop
-# is up so a browser that connects sees branded content while Slicer is still downloading. ---
-HERE=$(cd "$(dirname "$0")" && pwd)
-SPLASH=/tmp/desktopia-splash.png
-if command -v rsvg-convert >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
-  rsvg-convert -w 360 -h 360 "$HERE/resources/slicer-logo.svg" -o /tmp/_logo.png 2>/dev/null
-  convert -size 1920x1080 xc:'#15151f' /tmp/_logo.png -gravity center -geometry +0-70 -composite \
-    -gravity center -fill '#d8d8e0' -pointsize 40 -annotate +0+170 'Loading 3D Slicer...  please wait' \
-    "$SPLASH" 2>/dev/null
-fi
-if [ -f "$SPLASH" ] && command -v feh >/dev/null 2>&1; then feh --no-fehbg --bg-scale "$SPLASH" 2>/dev/null
-else xsetroot -solid '#15151f' 2>/dev/null || true; fi
+# --- loading splash (pre-rendered in CI; the box only needs feh): the Slicer logo + "please wait"
+# on the X root, shown the instant the desktop is up so a browser that connects sees branded content
+# while Slicer is still downloading. We swap to the no-text background once Slicer launches. ---
+SPLASH=/usr/local/share/desktopia/splash.png       # logo + "Loading 3D Slicer... please wait"
+BG=/usr/local/share/desktopia/background.png        # logo only (steady wallpaper)
+setbg() {
+  if [ -f "$1" ] && command -v feh >/dev/null 2>&1; then feh --no-fehbg --bg-scale "$1" 2>/dev/null
+  else xsetroot -solid '#15151f' 2>/dev/null || true; fi
+}
+setbg "$SPLASH"
 
-# --- launch Slicer as soon as its background download finishes, over the splash; the desktop +
-# stream are already live by now (the cert is printed below before this returns). Falls back to
-# glxgears if Slicer never arrives. ---
+# --- launch Slicer as soon as its background download lands (over the splash); the desktop + stream
+# are already live by now (the cert is printed below before this returns). Clear the "please wait"
+# afterward. Falls back to glxgears if Slicer never arrives. ---
 (
   for _ in $(seq 1 150); do
     SDIR=$(ls -d /opt/Slicer-*/ 2>/dev/null | head -1)
@@ -80,6 +78,7 @@ else xsetroot -solid '#15151f' 2>/dev/null || true; fi
   if [ -n "${SDIR:-}" ] && [ -x "$SDIR/Slicer" ]; then
     "$SDIR/Slicer" --no-splash >/tmp/slicer.log 2>&1 &
     sleep 8; wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz 2>/dev/null || true
+    setbg "$BG"
   else
     glxgears >/tmp/glxgears.log 2>&1 &
   fi
