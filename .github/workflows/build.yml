@@ -26,15 +26,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The vast base (vastai/linux-desktop, ~6 GB compressed / ~15 GB unpacked) + the builder
-      # stage overflow the runner's default ~14 GB free disk. Reclaim ~25 GB of preinstalled SDKs.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-                      /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /usr/lib/jvm || true
-          sudo docker image prune -af || true
-          df -h /
-
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
@@ -50,8 +41,9 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          provenance: false          # single clean manifest -> one layer the entrypoint can curl+extract
           tags: |
+            ${{ env.IMAGE }}:compositor
             ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

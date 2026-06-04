@@ -37,6 +37,27 @@ python3 -c 'import Xlib'  2>/dev/null     || need+=(python3-xlib)
 if [ ${#need[@]} -gt 0 ]; then apt-get update -qq; apt-get install -y --no-install-recommends "${need[@]}" >/dev/null 2>&1; fi
 python3 -c 'import aioquic' 2>/dev/null || pip3 install --break-system-packages "aioquic>=1.0" >/dev/null 2>&1
 
+# --- prebuilt compositor: fetch + extract the gst-wayland-display plugin + libwayland (~10 MB) from
+# the public GHCR artifact image instead of building it (~13 min). Skipped if already present (a dev
+# box that ran `make wl-setup`). The artifact is a FROM-scratch image whose layers untar to /. ---
+COMPOSITOR_SO=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0/libgstwaylanddisplaysrc.so
+if [ ! -f "$COMPOSITOR_SO" ]; then
+  echo "fetching prebuilt compositor..."
+  REPO=${DESKTOPIA_COMPOSITOR_REPO:-pieper/desktopia}; TAG=${DESKTOPIA_COMPOSITOR_TAG:-compositor}
+  TOK=$(curl -fsSL "https://ghcr.io/token?scope=repository:${REPO}:pull" 2>/dev/null \
+        | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))' 2>/dev/null)
+  for DIG in $(curl -fsSL -H "Authorization: Bearer $TOK" \
+                 -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+                 -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+                 "https://ghcr.io/v2/${REPO}/manifests/${TAG}" 2>/dev/null \
+               | python3 -c 'import sys,json
+for l in json.load(sys.stdin).get("layers",[]): print(l["digest"])' 2>/dev/null); do
+    curl -fsSL -H "Authorization: Bearer $TOK" "https://ghcr.io/v2/${REPO}/blobs/${DIG}" 2>/dev/null | tar -xz -C / 2>/dev/null
+  done
+  ldconfig
+  [ -f "$COMPOSITOR_SO" ] && echo "compositor installed" || echo "WARN: compositor fetch failed (run 'make wl-setup' to build it)"
+fi
+
 # --- unprivileged desktop user with passwordless sudo ---
 id user >/dev/null 2>&1 || useradd -m -s /bin/bash -U user 2>/dev/null || useradd -m -s /bin/bash user
 # The GPU render node's group varies per host (render / video / netdev on vast); add 'user' to
