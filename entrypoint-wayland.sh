@@ -6,14 +6,9 @@ set -uo pipefail
 cd "$(dirname "$0")"
 export DEBIAN_FRONTEND=noninteractive
 
-# --- vast ssh-mode (onstart): vast injects our SSH key into /root/.ssh, but some bases leave it
-# with perms sshd refuses ("bad ownership or modes for /root/.ssh/authorized_keys"). Fix it
-# repeatedly for the first minute (vast may write the key slightly after onstart begins). No-op in
-# the dev flow / where /root/.ssh is absent. ---
-( for _ in $(seq 1 20); do
-    [ -d /root/.ssh ] && { chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys; chmod go-w /root; } 2>/dev/null
-    sleep 3
-  done ) &
+# NOTE: do NOT touch /root/.ssh here. vast injects + maintains the SSH key itself; chmod'ing it
+# (or `vastai attach ssh`) races vast's key management and leaves authorized_keys in a state sshd
+# rejects ("bad ownership or modes"). Leave it alone and vanilla SSH works.
 
 # --- kill leftovers from a previous/crashed session so this run starts clean ---
 pkill -f session-wayland.sh   2>/dev/null || true
@@ -26,6 +21,7 @@ sleep 1
 # --- deps (root) ---
 need=()
 gst-inspect-1.0 x264enc >/dev/null 2>&1 || need+=(gstreamer1.0-plugins-ugly gstreamer1.0-libav)
+command -v Xwayland      >/dev/null 2>&1 || need+=(xwayland)
 command -v openbox       >/dev/null 2>&1 || need+=(openbox)
 command -v wmctrl        >/dev/null 2>&1 || need+=(wmctrl)
 command -v xterm         >/dev/null 2>&1 || need+=(xterm)
@@ -34,6 +30,13 @@ command -v vulkaninfo    >/dev/null 2>&1 || need+=(vulkan-tools libvulkan1)
 command -v sudo          >/dev/null 2>&1 || need+=(sudo)
 command -v gcc           >/dev/null 2>&1 || need+=(gcc)
 python3 -c 'import Xlib'  2>/dev/null     || need+=(python3-xlib)
+# GStreamer runtime + Python/GI bindings + the prebuilt compositor's shared-lib deps. The old build
+# path (provision-wayland.sh) installed these as a side effect; now that we FETCH the prebuilt
+# compositor instead of building, install them here or server.py fails ("Namespace Gst not available")
+# and waylanddisplaysrc won't load. apt skips whatever the base already has.
+python3 -c 'import gi; gi.require_version("Gst","1.0")' 2>/dev/null || need+=(python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0)
+gst-inspect-1.0 videoconvert >/dev/null 2>&1 || need+=(gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-tools gstreamer1.0-x)
+need+=(libgbm1 libdrm2 libinput10 libseat1 libxkbcommon0 libdisplay-info-dev libegl1 libgles2)
 if [ ${#need[@]} -gt 0 ]; then apt-get update -qq; apt-get install -y --no-install-recommends "${need[@]}" >/dev/null 2>&1; fi
 python3 -c 'import aioquic' 2>/dev/null || pip3 install --break-system-packages "aioquic>=1.0" >/dev/null 2>&1
 
