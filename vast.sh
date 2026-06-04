@@ -83,8 +83,13 @@ case "$cmd" in
       vastai create instance "$offer" --image "$GHCR_IMAGE" --env "$ENVOPTS" --disk 40 --ssh --direct \
         --onstart-cmd 'setsid bash /opt/desktopia/entrypoint-wayland.sh >/var/log/desktopia.log 2>&1 </dev/null &'
     else
-      echo "launching $BASE_IMAGE on offer $offer"
-      vastai create instance "$offer" --image "$BASE_IMAGE" --env "$ENVOPTS" --disk 40 --ssh --direct
+      # The ONLY working vast path: the vast base BY REFERENCE (managed sshd/ports) + an onstart.
+      # The onstart just fixes /root/.ssh perms for ~2.5 min (some hosts ship authorized_keys with
+      # perms sshd refuses); the desktop itself comes up via `make stream` (entrypoint fetches the
+      # prebuilt compositor + Slicer and streams). Derived/baked images do NOT work (not managed).
+      echo "launching $BASE_IMAGE on offer $offer (vast base by reference + perms-fix onstart)"
+      vastai create instance "$offer" --image "$BASE_IMAGE" --env "$ENVOPTS" --disk 40 --ssh --direct \
+        --onstart-cmd 'for i in $(seq 1 40); do chmod 700 /root/.ssh 2>/dev/null; chmod 600 /root/.ssh/authorized_keys 2>/dev/null; chmod go-w /root 2>/dev/null; sleep 4; done'
     fi
     ;;
   ls|list) vastai show instances-v1 ;;
