@@ -38,8 +38,11 @@ ENVOPTS='-p 4433:4433/udp -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE_DE
 # Region matters for interactive latency (motion-to-photon is RTT-bound). Constrain to
 # North America by default; override e.g. SEARCH_GEO='geolocation in [US]' for US-only.
 SEARCH_GEO=${SEARCH_GEO:-'geolocation in [US,CA]'}
-# inet_up = host UPLOAD (video flows host->browser); reliability/verified for stable hosts.
-SEARCH_Q="gpu_name=RTX_4090 num_gpus=1 rentable=true verified=true disk_space>=40 inet_up>=100 $SEARCH_GEO"
+# inet_up = host UPLOAD (video flows host->browser); verified + reliability>0.98 bias toward
+# stable hosts (coarse — the score is mostly historical uptime, so it won't catch every flaky
+# port-mapping host; the launcher's retry-on-bad-host is the real backstop). DESKTOPIA_BLOCKLIST
+# can carry host_ids we've seen fail, e.g. export DESKTOPIA_BLOCKLIST='host_id notin [392559,103782]'.
+SEARCH_Q="gpu_name=RTX_4090 num_gpus=1 rentable=true verified=true reliability>0.98 disk_space>=40 inet_up>=100 $SEARCH_GEO ${DESKTOPIA_BLOCKLIST:-}"
 
 need() { command -v "$1" >/dev/null || { echo "missing: $1" >&2; exit 1; }; }
 need vastai
