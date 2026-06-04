@@ -86,12 +86,15 @@ case "$cmd" in
       vastai create instance "$offer" --image "$GHCR_IMAGE" --env "$ENVOPTS" --disk 40 --ssh --direct \
         --onstart-cmd 'setsid bash /opt/desktopia/entrypoint-wayland.sh >/var/log/desktopia.log 2>&1 </dev/null &'
     else
-      # The ONLY working vast path: the vast base BY REFERENCE (vast manages sshd/keys/ports).
-      # Do NOT add an onstart that chmods /root/.ssh and do NOT `vastai attach ssh` — both race
-      # vast's key injection and break SSH. Vanilla --ssh --direct just works; the desktop comes
-      # up via `make stream` (entrypoint fetches the prebuilt compositor + Slicer and streams).
-      echo "launching $BASE_IMAGE on offer $offer (vast base by reference)"
-      vastai create instance "$offer" --image "$BASE_IMAGE" --env "$ENVOPTS" --disk 40 --ssh --direct
+      # Vast base BY REFERENCE (vast manages sshd/keys/ports). Vast INTERMITTENTLY provisions
+      # /root/.ssh/authorized_keys with perms sshd rejects ("bad ownership or modes" -> publickey
+      # refused) on ~half of boxes -- confirmed in `vastai logs`. A *persistent* chmod loop keeps
+      # the perms correct (a no-op when already fine, so safe everywhere; a finite loop stops too
+      # soon and the box "breaks" later). Do NOT `vastai attach ssh` -- that triggers a key
+      # re-write that can re-break the perms.
+      echo "launching $BASE_IMAGE on offer $offer (vast base by reference + persistent ssh-perms fix)"
+      vastai create instance "$offer" --image "$BASE_IMAGE" --env "$ENVOPTS" --disk 40 --ssh --direct \
+        --onstart-cmd 'while :; do chmod go-w /root /root/.ssh 2>/dev/null; chmod 600 /root/.ssh/authorized_keys 2>/dev/null; sleep 8; done'
     fi
     ;;
   ls|list) vastai show instances-v1 ;;
