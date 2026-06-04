@@ -61,7 +61,7 @@ openbox >/tmp/wm.log 2>&1 &
 SPLASH=/usr/local/share/desktopia/splash.png       # logo + "Loading 3D Slicer... please wait"
 BG=/usr/local/share/desktopia/background.png        # logo only (steady wallpaper)
 setbg() {
-  if [ -f "$1" ] && command -v feh >/dev/null 2>&1; then feh --no-fehbg --bg-scale "$1" 2>/dev/null
+  if [ -f "$1" ] && command -v xwallpaper >/dev/null 2>&1; then xwallpaper --zoom "$1" 2>/dev/null
   else xsetroot -solid '#15151f' 2>/dev/null || true; fi
 }
 setbg "$SPLASH"
