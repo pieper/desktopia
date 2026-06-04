@@ -35,13 +35,13 @@ ulimit -n 65536 2>/dev/null || true
 
 # --- openbox menu: Terminal, Chrome, Slicer, WM settings (no exit) ---
 mkdir -p ~/.config/openbox
-cat > ~/.config/openbox/menu.xml <<EOF
+cat > ~/.config/openbox/menu.xml <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_menu xmlns="http://openbox.org/3.4/menu">
   <menu id="root-menu" label="Desktopia">
     <item label="Terminal"><action name="Execute"><command>xterm</command></action></item>
     <item label="Google Chrome"><action name="Execute"><command>google-chrome --no-sandbox --no-first-run --no-default-browser-check</command></action></item>
-    <item label="3D Slicer"><action name="Execute"><command>$SLICER_DIR/Slicer --no-splash</command></action></item>
+    <item label="3D Slicer"><action name="Execute"><command>sh -c 'D=$(ls -d /opt/Slicer-*/ 2>/dev/null | head -1); exec "$D/Slicer" --no-splash'</command></action></item>
     <separator/>
     <item label="Window Manager Settings"><action name="Execute"><command>obconf</command></action></item>
   </menu>
@@ -54,15 +54,36 @@ for i in $(seq 1 40); do [ -e /tmp/.X11-unix/X2 ] && break; sleep 0.25; done
 # Chrome, and esp. wgpu's EGL backend) don't try the Wayland platform and crash (wl_drm BadAccess).
 unset WAYLAND_DISPLAY
 openbox >/tmp/wm.log 2>&1 &
-if [ -n "$SLICER_DIR" ]; then
-  "$SLICER_DIR/Slicer" --no-splash >/tmp/slicer.log 2>&1 &
-  sleep 8
-  wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz 2>/dev/null || true
-else
-  echo "NOTE: Slicer not found in /opt (the prebuilt image bakes it in; otherwise install it"
-  echo "      into /opt, e.g. 'make debug SCRIPT=slicertest' once). Showing glxgears."
-  glxgears >/tmp/glxgears.log 2>&1 &
+
+# --- loading splash: the Slicer logo + "please wait" on the X root, shown the instant the desktop
+# is up so a browser that connects sees branded content while Slicer is still downloading. ---
+HERE=$(cd "$(dirname "$0")" && pwd)
+SPLASH=/tmp/desktopia-splash.png
+if command -v rsvg-convert >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
+  rsvg-convert -w 360 -h 360 "$HERE/resources/slicer-logo.svg" -o /tmp/_logo.png 2>/dev/null
+  convert -size 1920x1080 xc:'#15151f' /tmp/_logo.png -gravity center -geometry +0-70 -composite \
+    -gravity center -fill '#d8d8e0' -pointsize 40 -annotate +0+170 'Loading 3D Slicer...  please wait' \
+    "$SPLASH" 2>/dev/null
 fi
+if [ -f "$SPLASH" ] && command -v feh >/dev/null 2>&1; then feh --no-fehbg --bg-scale "$SPLASH" 2>/dev/null
+else xsetroot -solid '#15151f' 2>/dev/null || true; fi
+
+# --- launch Slicer as soon as its background download finishes, over the splash; the desktop +
+# stream are already live by now (the cert is printed below before this returns). Falls back to
+# glxgears if Slicer never arrives. ---
+(
+  for _ in $(seq 1 150); do
+    SDIR=$(ls -d /opt/Slicer-*/ 2>/dev/null | head -1)
+    [ -n "$SDIR" ] && [ -x "$SDIR/Slicer" ] && break
+    sleep 2
+  done
+  if [ -n "${SDIR:-}" ] && [ -x "$SDIR/Slicer" ]; then
+    "$SDIR/Slicer" --no-splash >/tmp/slicer.log 2>&1 &
+    sleep 8; wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz 2>/dev/null || true
+  else
+    glxgears >/tmp/glxgears.log 2>&1 &
+  fi
+) &
 
 echo "=================================================================="
 echo -n "CERT_SHA256_BASE64="

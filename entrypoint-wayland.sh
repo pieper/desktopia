@@ -24,6 +24,10 @@ gst-inspect-1.0 x264enc >/dev/null 2>&1 || need+=(gstreamer1.0-plugins-ugly gstr
 command -v Xwayland      >/dev/null 2>&1 || need+=(xwayland)
 command -v openbox       >/dev/null 2>&1 || need+=(openbox)
 command -v wmctrl        >/dev/null 2>&1 || need+=(wmctrl)
+command -v feh           >/dev/null 2>&1 || need+=(feh)                  # loading-splash wallpaper
+command -v convert       >/dev/null 2>&1 || need+=(imagemagick)          # compose the splash
+command -v rsvg-convert  >/dev/null 2>&1 || need+=(librsvg2-bin)         # render the Slicer SVG logo
+command -v xsetroot      >/dev/null 2>&1 || need+=(x11-xserver-utils)    # splash fallback (solid bg)
 command -v xterm         >/dev/null 2>&1 || need+=(xterm)
 command -v obconf        >/dev/null 2>&1 || need+=(obconf)
 command -v vulkaninfo    >/dev/null 2>&1 || need+=(vulkan-tools libvulkan1)
@@ -95,13 +99,13 @@ if [ ! -f "$PRELOAD" ] && command -v gcc >/dev/null 2>&1; then
   gcc -shared -fPIC -o "$PRELOAD" /tmp/ncr.c 2>/dev/null || true
 fi
 
-# --- 3D Slicer on demand: the image doesn't bake it (it's a ~5 s download). Fetch into /opt
-# (where session-wayland.sh looks for it) if absent; the curl|tar pipe overlaps download+extract. ---
+# --- 3D Slicer: fetch into /opt in the BACKGROUND so the desktop + QUIC stream come up immediately.
+# session-wayland.sh shows a "Loading 3D Slicer..." splash (the logo on the X root) and launches
+# Slicer the moment the download lands, so the browser gets a page right away. ---
 if ! ls -d /opt/Slicer-*/ >/dev/null 2>&1; then
-  echo "fetching 3D Slicer..."
-  mkdir -p /opt
-  curl -L --retry 3 "https://download.slicer.org/download?os=linux&stability=release" \
-    | tar -xz -C /opt 2>/dev/null || echo "Slicer fetch failed (session will show glxgears)"
+  ( echo "fetching 3D Slicer..."; mkdir -p /opt
+    curl -L --retry 3 "https://download.slicer.org/download?os=linux&stability=release" \
+      | tar -xz -C /opt && echo "Slicer ready" || echo "Slicer fetch failed" ) >/tmp/slicer-fetch.log 2>&1 &
 fi
 
 # --- persistent WebTransport cert (ECDSA P-256, <=14d). Migrate the old /root cert so the
