@@ -15,26 +15,88 @@
          line-height: 1.45; color: #9a9ab0; width: 80vw; max-width: 1100px; height: 46vh;
          overflow-y: auto; white-space: pre-wrap; text-align: left; box-sizing: border-box;
          background: #0e0e16; border: 1px solid #2c2c3a; border-radius: 8px; padding: 12px 14px; }
-  .spinner { width: 42px; height: 42px; border: 4px solid #2c2c3a; border-top-color: #6cc6ff;
-             border-radius: 50%; animation: spin 1s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  #life { width: 132px; height: 132px; image-rendering: pixelated;
+          border: 1px solid #2c2c3a; border-radius: 8px; background: #15151f; }
+  #sub { font-size: 13px; color: #6cc6ff; margin-top: -8px; min-height: 16px; font-family: ui-monospace, Menlo, monospace; }
+  #panes { display: flex; gap: 16px; width: 92vw; max-width: 1500px; }
+  .pane { flex: 1 1 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .plabel { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #6a6a82; text-align: left; }
+  .plog { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+          line-height: 1.4; color: #9a9ab0; height: 42vh; overflow-y: auto; white-space: pre-wrap;
+          text-align: left; box-sizing: border-box; margin: 0; word-break: break-word;
+          background: #0e0e16; border: 1px solid #2c2c3a; border-radius: 8px; padding: 10px 12px; }
 </style>
 </head>
 <body>
 <canvas id="v" width="1920" height="1080"></canvas>
 <div id="overlay">
-  <div class="spinner"></div>
+  <canvas id="life" width="100" height="100"></canvas>
   <div id="phase">Starting…</div>
-  <pre id="log"></pre>
+  <div id="sub"></div>
+  <div id="panes">
+    <div class="pane"><div class="plabel">image pull · host daemon</div><pre class="plog" id="logD"></pre></div>
+    <div class="pane"><div class="plabel">desktop · container</div><pre class="plog" id="logC"></pre></div>
+  </div>
 </div>
 <script>
 const HDR = 9; // u32 frame_id, u8 flags, u16 n_chunks, u16 chunk_idx
 const ctx = document.getElementById('v').getContext('2d');
 const overlay = document.getElementById('overlay');
 const phaseEl = document.getElementById('phase');
-const logEl = document.getElementById('log');
+const subEl = document.getElementById('sub');
+const logD = document.getElementById('logD');   // host daemon: docker image pull / provisioning
+const logC = document.getElementById('logC');   // container: desktop + stream stdout
+const setPane = (el, txt) => {                   // replace text, stick to bottom unless scrolled up
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  if (el.textContent !== (txt || '')) el.textContent = txt || '';
+  if (atBottom) el.scrollTop = el.scrollHeight;
+};
 const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 let requestKey = () => {};   // set once the input channel is open; called by the decoder on loss
+
+// ---- "please wait" visual: Conway's Game of Life, reseeded every 10s. A cell is WHITE the
+// generation it changes state (just born) and fades toward gray the longer it stays alive. ----
+(function life() {
+  const cv = document.getElementById('life'); if (!cv) return;
+  const W = 100, H = 100, lc = cv.getContext('2d'), img = lc.createImageData(W, H);
+  let cur = new Uint8Array(W * H), age = new Uint16Array(W * H);
+  const seed = () => { for (let i = 0; i < W * H; i++) { cur[i] = Math.random() < 0.30 ? 1 : 0; age[i] = 0; } };
+  function step() {
+    const next = new Uint8Array(W * H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let n = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        n += cur[((y + dy + H) % H) * W + ((x + dx + W) % W)];   // toroidal wrap
+      }
+      const i = y * W + x, a = cur[i], alive = a ? (n === 2 || n === 3) : (n === 3);
+      next[i] = alive ? 1 : 0;
+      age[i] = alive ? (a ? Math.min(age[i] + 1, 255) : 0) : 0;   // survived -> older; born -> 0 (white)
+    }
+    cur = next;
+  }
+  function render() {
+    const d = img.data;
+    for (let i = 0; i < W * H; i++) {
+      const o = i * 4; d[o + 3] = 255;
+      if (cur[i]) { const t = Math.min(age[i] / 8, 1);                 // white(255,255,255) -> gray(74,74,90)
+        d[o] = 255 + (74 - 255) * t; d[o + 1] = 255 + (74 - 255) * t; d[o + 2] = 255 + (90 - 255) * t; }
+      else { d[o] = 0x15; d[o + 1] = 0x15; d[o + 2] = 0x1f; }         // dead = page background
+    }
+    lc.putImageData(img, 0, 0);
+  }
+  seed(); render();
+  let lastStep = 0, lastSeed = 0;
+  function frame(t) {
+    if (!overlay.classList.contains('hidden')) {                      // pause once the stream is showing
+      if (!lastSeed) lastSeed = t;
+      if (t - lastSeed >= 10000) { seed(); lastSeed = t; }
+      if (t - lastStep >= 110) { step(); render(); lastStep = t; }
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
 
 // ---- Phase 1: poll the launcher's status.json until the stream is ready, showing boot progress ----
 async function poll() {
@@ -43,9 +105,9 @@ async function poll() {
   catch (e) {}
   if (s) {
     phaseEl.textContent = s.phase || '…';
-    const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
-    logEl.textContent = s.log || '';
-    if (atBottom) logEl.scrollTop = logEl.scrollHeight;   // stick to bottom unless scrolled up
+    subEl.textContent = s.headline || '';
+    setPane(logD, s.log_daemon);
+    setPane(logC, s.log_container);
     if (s.ready && s.ip_port && s.cert) { connect(s.ip_port, s.cert); return; }
   } else {
     phaseEl.textContent = 'waiting for launcher…';

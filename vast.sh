@@ -93,8 +93,11 @@ case "$cmd" in
       # soon and the box "breaks" later). Do NOT `vastai attach ssh` -- that triggers a key
       # re-write that can re-break the perms.
       echo "launching $BASE_IMAGE on offer $offer (vast base by reference + persistent ssh-perms fix)"
+      # StrictModes stays ON (vast's `sed s/StrictModes yes/no/` misses the COMMENTED stock line), so
+      # sshd enforces authorized_keys OWNERSHIP+modes. vast intermittently leaves it owned by a
+      # non-root uid -> "bad ownership or modes" -> key auth refused. chmod alone can't fix it; chown too.
       vastai create instance "$offer" --image "$BASE_IMAGE" --env "$ENVOPTS" --disk 40 --ssh --direct \
-        --onstart-cmd 'while :; do chmod go-w /root /root/.ssh 2>/dev/null; chmod 600 /root/.ssh/authorized_keys 2>/dev/null; sleep 8; done'
+        --onstart-cmd 'while :; do chown root:root /root /root/.ssh /root/.ssh/authorized_keys 2>/dev/null; chmod 755 /root 2>/dev/null; chmod 700 /root/.ssh 2>/dev/null; chmod 600 /root/.ssh/authorized_keys 2>/dev/null; sleep 3; done'
     fi
     ;;
   ls|list) vastai show instances-v1 ;;
