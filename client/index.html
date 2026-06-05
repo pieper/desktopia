@@ -115,15 +115,41 @@ async function poll() {
   setTimeout(poll, 600);
 }
 
+// ---- resilience: the server is per-session stateless and force-sends a keyframe on every connect,
+// so recovering from a dropped session or a stalled stream is just "tear down + re-poll + reconnect".
+let streamGen = 0;          // bumped each (re)connect; stale async closures bail when gen != streamGen
+let reconnectGen = -1;      // dedupes multiple drop signals (wt.closed + reader-end + watchdog) per session
+let curWT = null, curDecoder = null, watchdogTimer = null, lastFrameAt = 0;
+
+function dropAndReconnect(reason) {
+  if (reconnectGen === streamGen) return;        // already tearing this session down
+  reconnectGen = streamGen;
+  if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
+  requestKey = () => {};
+  try { if (curDecoder && curDecoder.state !== 'closed') curDecoder.close(); } catch (_) {}
+  try { if (curWT) curWT.close(); } catch (_) {}
+  curWT = curDecoder = null;
+  overlay.classList.remove('hidden');            // Game of Life resumes as the "reconnecting" state
+  phaseEl.textContent = 'Reconnecting to the live stream…';
+  subEl.textContent = reason || '';
+  setPane(logD, ''); setPane(logC, '');
+  setTimeout(poll, 1000);                         // poll re-reads status.json for the current endpoint/cert
+}
+
 // ---- Phase 2: connect the WebTransport / WebCodecs stream; hide the overlay on the first frame ----
 function connect(IP_PORT, CERT_B64) {
+  const gen = ++streamGen;
+  if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
   phaseEl.textContent = 'Connecting to stream…';
   let firstFrame = false;
   const decoder = new VideoDecoder({
-    output: f => { if (!firstFrame) { firstFrame = true; overlay.classList.add('hidden'); }
+    output: f => { if (gen !== streamGen) { f.close(); return; }
+                   lastFrameAt = performance.now();
+                   if (!firstFrame) { firstFrame = true; overlay.classList.add('hidden'); }
                    ctx.drawImage(f, 0, 0, 1920, 1080); f.close(); },
     error: e => { console.warn("decode", e); requestKey(); }
   });
+  curDecoder = decoder;
   // No `description` => decoder expects Annex-B (matches stream-format=byte-stream)
   decoder.configure({ codec: "avc1.640028", optimizeForLatency: true });
 
@@ -131,7 +157,11 @@ function connect(IP_PORT, CERT_B64) {
     const wt = new WebTransport(`https://${IP_PORT}/stream`, {
       serverCertificateHashes: [{ algorithm: "sha-256", value: b64(CERT_B64) }]
     });
+    curWT = wt;
     await wt.ready;
+    if (gen !== streamGen) { try { wt.close(); } catch (_) {} return; }
+    wt.closed.then(() => dropAndReconnect('connection closed'))
+             .catch(() => dropAndReconnect('connection lost'));
 
     // One reliable client->server stream carries keyframe requests AND input events.
     const inW = (await wt.createUnidirectionalStream()).getWriter();
@@ -139,6 +169,16 @@ function connect(IP_PORT, CERT_B64) {
     function needKey() { send(new Uint8Array([0x00])); }   // type 0 = keyframe request
     requestKey = needKey;
     setupInput(send);
+
+    // ---- stall watchdog: a stalled encoder (host CPU/GPU contention) or silent packet loss stops
+    // frames without closing the session; nudge a keyframe at 2.5s, force a full reconnect at 6s. ----
+    lastFrameAt = performance.now();
+    watchdogTimer = setInterval(() => {
+      if (gen !== streamGen) return;
+      const dt = performance.now() - lastFrameAt;
+      if (dt > 6000) dropAndReconnect('stream stalled');
+      else if (dt > 2500) needKey();
+    }, 1000);
 
     function setupInput(send) {
       const canvas = document.getElementById('v');
@@ -210,9 +250,13 @@ function connect(IP_PORT, CERT_B64) {
     }
 
     const reader = wt.datagrams.readable.getReader();
-    while (true) { const { value, done } = await reader.read(); if (done) break; onDatagram(value); }
-  })().catch(e => { phaseEl.textContent = 'connection failed — retrying…'; logEl.textContent = String(e);
-                    overlay.classList.remove('hidden'); setTimeout(poll, 1500); });
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done || gen !== streamGen) break;
+      onDatagram(value);
+    }
+    if (gen === streamGen) dropAndReconnect('stream ended');
+  })().catch(e => { console.warn('connect', e); if (gen === streamGen) dropAndReconnect('connect failed'); });
 }
 
 poll();

@@ -120,7 +120,19 @@ class Broadcaster:
         self.enc = self.pipe.get_by_name("enc")
         self.pipe.get_by_name("sink").connect("new-sample", self._on_sample)
         bus = self.pipe.get_bus(); bus.add_signal_watch()
-        bus.connect("message::error", lambda _b, m: print("GST ERROR:", m.parse_error(), flush=True))
+        bus.connect("message::error", self._on_bus)
+        bus.connect("message::eos", self._on_bus)
+
+    def _on_bus(self, _bus, msg):
+        # NOTE: a blind set_state(NULL)->PLAYING restart is NOT safe here -- waylanddisplaysrc IS the
+        # Wayland compositor and Xwayland/Slicer are its clients, so restarting the pipeline tears the
+        # whole desktop down. So log loudly; the browser auto-reconnects for transient stalls, and a
+        # hard pipeline failure needs a session relaunch (session-wayland.sh). A true in-place
+        # restart-watchdog would require splitting the compositor and encoder into separate pipelines.
+        if msg.type == Gst.MessageType.ERROR:
+            err, dbg = msg.parse_error(); print("GST PIPELINE ERROR:", err, dbg, flush=True)
+        else:
+            print("GST PIPELINE EOS", flush=True)
 
     def start(self):
         self.pipe.set_state(Gst.State.PLAYING)
@@ -230,7 +242,11 @@ async def main():
     ap.add_argument("--port", type=int, default=4433)
     args = ap.parse_args()
 
-    cfg = QuicConfiguration(alpn_protocols=["h3"], is_client=False, max_datagram_frame_size=1500)
+    # idle_timeout reaps a frozen/uncleanly-closed viewer (no QUIC ACKs) in ~25s instead of the 60s
+    # default, so the broadcaster stops fanning datagrams at dead sessions and they don't pile up
+    # (a healthy viewer ACKs the constant datagram flow, so it never trips this).
+    cfg = QuicConfiguration(alpn_protocols=["h3"], is_client=False, max_datagram_frame_size=1500,
+                            idle_timeout=25.0)
     cfg.load_cert_chain(args.cert, args.key)
 
     loop = asyncio.get_running_loop()
