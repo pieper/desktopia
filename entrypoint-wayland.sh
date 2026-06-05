@@ -93,8 +93,13 @@ for l in json.load(sys.stdin).get("layers",[]): print(l["digest"])' 2>/dev/null)
   [ -f "$COMPOSITOR_SO" ] && echo "compositor installed" || echo "WARN: compositor fetch failed (run 'make wl-setup' to build it)"
 fi
 
-# --- unprivileged desktop user with passwordless sudo ---
-id user >/dev/null 2>&1 || useradd -m -s /bin/bash -U user 2>/dev/null || useradd -m -s /bin/bash user
+# --- unprivileged desktop user with passwordless sudo. The stock base ships a half-baked 'user'
+# acct whose PRIMARY group is root (gid 0) -> /home/user ends up group-root and HOME-based writes
+# (settings, ~/Data) misbehave. Force a real 'user' group and let 'user' OWN its home. ---
+id user >/dev/null 2>&1 || useradd -m -s /bin/bash user
+getent group user >/dev/null 2>&1 || groupadd user
+usermod -g user user 2>/dev/null || true                 # primary group 'user', NOT root(0)
+mkdir -p /home/user && chown -R user:user /home/user
 # The GPU render node's group varies per host (render / video / netdev on vast); add 'user' to
 # whatever group actually owns it, or the headless compositor can't open it (empty DMA formats).
 RNODE_GRPS=$(ls /dev/dri/renderD* 2>/dev/null | xargs -r -n1 stat -c %G 2>/dev/null | sort -u | paste -sd, -)
@@ -103,7 +108,7 @@ echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/desktopia-user; chmod 440 /e
 
 # --- stage the scripts where 'user' can read them (avoids /root being root-only) ---
 RUN_DIR=/home/user/desktopia
-mkdir -p "$RUN_DIR"; cp -rf "$PWD/." "$RUN_DIR/" 2>/dev/null || true; chown -R user "$RUN_DIR"
+mkdir -p "$RUN_DIR"; cp -rf "$PWD/." "$RUN_DIR/" 2>/dev/null || true; chown -R user:user "$RUN_DIR"
 
 # --- Chrome: no sign-in prompts / promos (managed policy applies to every launch) ---
 mkdir -p /etc/opt/chrome/policies/managed
@@ -146,9 +151,10 @@ if [ ! -f "$CERT" ] || ! openssl x509 -in "$CERT" -checkend 86400 >/dev/null 2>&
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -keyout "$KEY" -out "$CERT" -days 13 -nodes -subj "/CN=desktopia" 2>/dev/null
 fi
-chown user "$CERT" "$KEY" 2>/dev/null || true
+chown user:user "$CERT" "$KEY" 2>/dev/null || true
 
-# --- run the session as 'user' from the staged copy (keeps the TTY for make stream / Ctrl-C) ---
+# --- run the session as 'user' from the staged copy (keeps the TTY for make stream / Ctrl-C).
+# Pass HOME=/home/user explicitly: -H alone proved unreliable on this base (apps fell back to /root). ---
 exec sudo -u user -H \
-  DESKTOPIA_PRELOAD="$PRELOAD" DESKTOPIA_CERT="$CERT" DESKTOPIA_KEY="$KEY" \
+  HOME=/home/user DESKTOPIA_PRELOAD="$PRELOAD" DESKTOPIA_CERT="$CERT" DESKTOPIA_KEY="$KEY" \
   bash "$RUN_DIR/session-wayland.sh"

@@ -4,6 +4,10 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
+# Force HOME so every app (Slicer settings, pcmanfm, xterm, ~/Data) uses /home/user, not /root.
+# The base's `user` acct + sudo -H proved unreliable here. (cwd stays the script dir for server.py.)
+export HOME=/home/user
+
 # --- compositor-side env (NOT the NVIDIA GBM env — that is for X clients only) ---
 export LD_LIBRARY_PATH=/usr/local/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}   # libwayland 1.25
 export GST_PLUGIN_PATH=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0:${GST_PLUGIN_PATH:-}
@@ -83,9 +87,6 @@ setbg "$SPLASH"
     "$SDIR/Slicer" --no-splash >/tmp/slicer.log 2>&1 &
     sleep 8; wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz 2>/dev/null || true
     setbg "$BG"
-    # file browser, launched AFTER Slicer is maximized so it floats on top (drag files onto Slicer).
-    # NOT --desktop (that would fight our xwallpaper background).
-    command -v pcmanfm >/dev/null 2>&1 && pcmanfm /home/user >/tmp/pcmanfm.log 2>&1 &
   else
     glxgears >/tmp/glxgears.log 2>&1 &
   fi
