@@ -6,7 +6,8 @@
 #   ./vast.sh best                   # print the single best OFFER_ID
 #   ./vast.sh up <OFFER_ID> [ghcr]   # create instance (default base image; 'ghcr' = built image)
 #   ./vast.sh ls                     # show instances + mapped ports
-#   ./vast.sh ssh                    # ssh into the (first) instance
+#   ./vast.sh ssh [ssh-args...]      # ssh into the (first) instance; extra args pass to ssh,
+#                                    #   e.g. ./vast.sh ssh -L 2027:localhost:2027  (port-forward)
 #   ./vast.sh sync                   # rsync this repo to /root/desktopia on the instance
 #   ./vast.sh wl-setup               # build the compositor + libwayland on a bare instance
 #   ./vast.sh stream                 # run the desktop + QUIC stream (entrypoint-wayland.sh)
@@ -102,9 +103,11 @@ case "$cmd" in
     ;;
   ls|list) vastai show instances-v1 ;;
   url)  vastai ssh-url "$(instance_id)" ;;
-  ssh)
+  ssh)   # extra args pass straight to ssh -- BEFORE the host so they're options, not a remote command:
+         #   ./vast.sh ssh -L 2027:localhost:2027        (port-forward)
+         #   ./vast.sh ssh -L 8888:localhost:8888 -N     (forward only, no shell)
     PORT="" USER_="" HOST=""; read -r PORT USER_ HOST < <(ssh_parts)
-    exec ssh $SSH_OPTS -p "$PORT" "$USER_@$HOST"
+    exec ssh $SSH_OPTS "$@" -p "$PORT" "$USER_@$HOST"
     ;;
   sync)
     PORT="" USER_="" HOST=""; read -r PORT USER_ HOST < <(ssh_parts)
