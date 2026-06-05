@@ -160,8 +160,10 @@ function connect(IP_PORT, CERT_B64) {
     curWT = wt;
     await wt.ready;
     if (gen !== streamGen) { try { wt.close(); } catch (_) {} return; }
-    wt.closed.then(() => dropAndReconnect('connection closed'))
-             .catch(() => dropAndReconnect('connection lost'));
+    // gen-guard: a PREVIOUS session's wt.closed can resolve late, AFTER the new connect() has bumped
+    // streamGen -- without this guard it would tear down the new healthy session and loop forever.
+    wt.closed.then(() => { if (gen === streamGen) dropAndReconnect('connection closed'); })
+             .catch(() => { if (gen === streamGen) dropAndReconnect('connection lost'); });
 
     // One reliable client->server stream carries keyframe requests AND input events.
     const inW = (await wt.createUnidirectionalStream()).getWriter();
