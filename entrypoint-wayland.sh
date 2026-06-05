@@ -141,6 +141,20 @@ if ! ls -d /opt/Slicer-*/ >/dev/null 2>&1; then
       | tar -xz -C /opt && echo "Slicer ready" || echo "Slicer fetch failed" ) >/tmp/slicer-fetch.log 2>&1 &
 fi
 
+# --- Google Chrome: the thin base ships only a chromium SNAP stub (won't run in-container); the old
+# desktop base bundled real Chrome. Install the .deb in the background, but WAIT until Slicer is up
+# first (user: don't slow Slicer for Chrome) so the Slicer download + first render get all the
+# bandwidth/CPU. This subshell is backgrounded before the exec below, so it outlives it and gates on
+# the SlicerApp process that session-wayland.sh launches. Menu "Google Chrome" works once it lands. ---
+if ! command -v google-chrome >/dev/null 2>&1; then
+  ( for _ in $(seq 1 600); do pgrep -f SlicerApp-real >/dev/null 2>&1 && break; sleep 2; done
+    sleep 10                                 # let Slicer settle past its heavy startup render
+    echo "installing google-chrome..."
+    curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+      && apt-get install -y --no-install-recommends /tmp/chrome.deb && rm -f /tmp/chrome.deb \
+      && echo "chrome ready" || echo "chrome install failed" ) >/tmp/chrome-install.log 2>&1 &
+fi
+
 # --- persistent WebTransport cert (ECDSA P-256, <=14d). Migrate the old /root cert so the
 # pasted hash stays stable; regenerate only when missing/near-expiry. Owned by 'user'. ---
 CERT=/home/user/desktopia-cert.pem; KEY=/home/user/desktopia-key.pem
