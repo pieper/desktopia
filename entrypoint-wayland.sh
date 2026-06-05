@@ -35,6 +35,7 @@ command -v xwallpaper    >/dev/null 2>&1 || need+=(xwallpaper)           # set t
 command -v xsetroot      >/dev/null 2>&1 || need+=(x11-xserver-utils)    # splash fallback (solid bg)
 command -v xterm         >/dev/null 2>&1 || need+=(xterm)
 command -v pcmanfm       >/dev/null 2>&1 || need+=(pcmanfm)             # lightweight file manager; drag-drop files into Slicer
+command -v xclip         >/dev/null 2>&1 || need+=(xclip)               # explicit clipboard push/pull (X11 CLIPBOARD on :2)
 command -v obconf        >/dev/null 2>&1 || need+=(obconf)
 command -v vulkaninfo    >/dev/null 2>&1 || need+=(vulkan-tools libvulkan1)
 command -v sudo          >/dev/null 2>&1 || need+=(sudo)

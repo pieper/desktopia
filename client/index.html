@@ -6,7 +6,59 @@
 <style>
   body { margin: 0; background: #15151f; color: #d8d8e0;
          font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
-  #v { width: 100vw; height: 100vh; object-fit: contain; display: block; background: #15151f; }
+  #v { position: fixed; top: 30px; left: 0; width: 100vw; height: calc(100vh - 30px);
+       object-fit: contain; display: block; background: #15151f; }
+
+  /* --- thin liquid-glass status + menu bar --- */
+  #topbar { position: fixed; top: 0; left: 0; right: 0; height: 30px; z-index: 50;
+    display: flex; align-items: center; gap: 16px; padding: 0 12px; box-sizing: border-box;
+    font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: #c7c7d6;
+    background: rgba(22,22,32,0.55); backdrop-filter: blur(18px) saturate(160%);
+    -webkit-backdrop-filter: blur(18px) saturate(160%);
+    border-bottom: 1px solid rgba(255,255,255,0.08); }
+  #topbar .stat b { color: #7fe0a0; font-weight: 600; }
+  #topbar .stat .u { color: #6a6a82; }
+  #topbar .spacer { flex: 1; }
+  #conn { width: 8px; height: 8px; border-radius: 50%; background: #e0a05a; flex: none; }
+  #conn.ok { background: #5ad07a; }
+  #ctrlBtn { cursor: pointer; padding: 4px 12px; border-radius: 7px; color: #eaeaf2;
+    background: rgba(108,198,255,0.18); border: 1px solid rgba(108,198,255,0.35); font-weight: 600; }
+  #ctrlBtn:hover { background: rgba(108,198,255,0.30); }
+
+  /* --- liquid-glass control panel popup --- */
+  #panel { position: fixed; top: 40px; right: 12px; width: 380px; max-height: calc(100vh - 56px);
+    overflow-y: auto; z-index: 60; display: none; flex-direction: column; gap: 16px; padding: 16px;
+    box-sizing: border-box; color: #e6e6ef;
+    background: rgba(20,20,31,0.60); backdrop-filter: blur(30px) saturate(180%);
+    -webkit-backdrop-filter: blur(30px) saturate(180%);
+    border: 1px solid rgba(255,255,255,0.14); border-radius: 16px;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.5); }
+  #panel.open { display: flex; }
+  #panel h3 { margin: 0 0 4px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #8a8aa0; }
+  #panel section { display: flex; flex-direction: column; gap: 8px; }
+  #panel textarea { width: 100%; height: 60px; resize: vertical; box-sizing: border-box;
+    background: rgba(0,0,0,0.30); color: #e6e6ef; border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px; padding: 8px; font: 13px ui-monospace, Menlo, monospace; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .btn { cursor: pointer; padding: 6px 10px; border-radius: 8px; font-size: 12px; color: #eaeaf2;
+    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.14); user-select: none; }
+  .btn:hover { background: rgba(255,255,255,0.16); }
+  .btn.accent { background: rgba(108,198,255,0.20); border-color: rgba(108,198,255,0.40); }
+  .hint { font-size: 11px; color: #6a6a82; }
+  #clipHist { display: flex; flex-direction: column; gap: 6px; max-height: 170px; overflow-y: auto; }
+  .clipItem { display: flex; gap: 8px; align-items: center; background: rgba(0,0,0,0.25);
+    border: 1px solid rgba(255,255,255,0.08); border-radius: 7px; padding: 5px 8px; }
+  .clipItem .txt { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font: 12px ui-monospace, Menlo, monospace; color: #b9b9cc; cursor: pointer; }
+  .clipItem .dir { font-size: 9px; letter-spacing: .05em; color: #6a6a82; flex: none; width: 26px; }
+  #vkbd { display: flex; flex-direction: column; gap: 4px; }
+  #vkbd .krow { display: flex; gap: 4px; }
+  #vkbd .key { flex: 1 1 0; min-width: 0; text-align: center; cursor: pointer; user-select: none;
+    padding: 7px 0; border-radius: 6px; font-size: 12px; color: #e6e6ef;
+    background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.12); }
+  #vkbd .key:hover { background: rgba(255,255,255,0.16); }
+  #vkbd .key.held { background: rgba(108,198,255,0.35); border-color: rgba(108,198,255,0.6); }
+  #vkbd .key.wide { flex: 1.7 1 0; }
   #overlay { position: fixed; inset: 0; display: flex; flex-direction: column;
              align-items: center; justify-content: center; gap: 20px; background: #15151f; }
   #overlay.hidden { display: none; }
@@ -28,6 +80,37 @@
 </style>
 </head>
 <body>
+<div id="topbar">
+  <span id="conn" title="connection"></span>
+  <span class="stat"><b id="fps">—</b> <span class="u">fps</span></span>
+  <span class="stat"><b id="mbps">—</b> <span class="u">Mbps</span></span>
+  <span class="stat"><b id="rtt">—</b> <span class="u">ms&nbsp;rtt</span></span>
+  <span class="spacer"></span>
+  <span id="ctrlBtn">⌨&nbsp;&nbsp;Controls</span>
+</div>
+<div id="panel">
+  <section>
+    <h3>Clipboard <span class="hint">— explicit, nothing auto-syncs</span></h3>
+    <textarea id="clipText" placeholder="Type or paste here, then Push to set the remote clipboard…"></textarea>
+    <div class="row">
+      <span class="btn accent" id="clipPush">Push&nbsp;→&nbsp;remote</span>
+      <span class="btn" id="clipPull">Pull&nbsp;←&nbsp;remote</span>
+      <span class="hint" id="clipMsg"></span>
+    </div>
+    <h3>History <span class="hint" id="clipHistInfo"></span></h3>
+    <div id="clipHist"></div>
+  </section>
+  <section>
+    <h3>Keyboard</h3>
+    <div class="row"><span class="btn" id="cad">Ctrl-Alt-Del</span>
+      <span class="hint">sticky modifiers: tap Ctrl/Alt/Shift, then a key</span></div>
+    <div id="vkbd"></div>
+  </section>
+  <section>
+    <h3>Shared folders <span class="hint">— coming next</span></h3>
+    <div class="hint">FUSE ↔ File System Access directory sharing (lazy upload/download) will live here.</div>
+  </section>
+</div>
 <canvas id="v" width="1920" height="1080"></canvas>
 <div id="overlay">
   <canvas id="life" width="100" height="100"></canvas>
@@ -53,6 +136,12 @@ const setPane = (el, txt) => {                   // replace text, stick to botto
 };
 const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 let requestKey = () => {};   // set once the input channel is open; called by the decoder on loss
+let ctrlSend = () => {};     // set when the control stream opens; sends NDJSON {t:...} to the server
+let sendInput = () => {};    // the raw input-channel send (used by the on-screen keyboard / Ctrl-Alt-Del)
+let statBytes = 0, statFrames = 0, lastRtt = null, pingId = 0;
+const pingPending = new Map();
+const fpsEl = document.getElementById('fps'), mbpsEl = document.getElementById('mbps'),
+      rttEl = document.getElementById('rtt'), connEl = document.getElementById('conn');
 
 // ---- "please wait" visual: Conway's Game of Life, reseeded every 10s. A cell is WHITE the
 // generation it changes state (just born) and fades toward gray the longer it stays alive. ----
@@ -129,6 +218,7 @@ function dropAndReconnect(reason) {
   try { if (curDecoder && curDecoder.state !== 'closed') curDecoder.close(); } catch (_) {}
   try { if (curWT) curWT.close(); } catch (_) {}
   curWT = curDecoder = null;
+  connEl.classList.remove('ok');
   overlay.classList.remove('hidden');            // Game of Life resumes as the "reconnecting" state
   phaseEl.textContent = 'Reconnecting to the live stream…';
   subEl.textContent = reason || '';
@@ -144,8 +234,8 @@ function connect(IP_PORT, CERT_B64) {
   let firstFrame = false;
   const decoder = new VideoDecoder({
     output: f => { if (gen !== streamGen) { f.close(); return; }
-                   lastFrameAt = performance.now();
-                   if (!firstFrame) { firstFrame = true; overlay.classList.add('hidden'); }
+                   statFrames++; lastFrameAt = performance.now();
+                   if (!firstFrame) { firstFrame = true; overlay.classList.add('hidden'); connEl.classList.add('ok'); }
                    ctx.drawImage(f, 0, 0, 1920, 1080); f.close(); },
     error: e => { console.warn("decode", e); requestKey(); }
   });
@@ -170,7 +260,25 @@ function connect(IP_PORT, CERT_B64) {
     const send = a => inW.write(a).catch(e => console.warn("send fail", e));
     function needKey() { send(new Uint8Array([0x00])); }   // type 0 = keyframe request
     requestKey = needKey;
+    sendInput = send;                               // expose to the control panel (vkbd, Ctrl-Alt-Del)
     setupInput(send);
+
+    // ---- control channel: a 2nd uni-stream tagged 0xC7 -> explicit clipboard + ping/pong RTT ----
+    const ctrlW = (await wt.createUnidirectionalStream()).getWriter();
+    await ctrlW.write(new Uint8Array([0xC7]));
+    const _enc = new TextEncoder();
+    ctrlSend = obj => { try { ctrlW.write(_enc.encode(JSON.stringify(obj) + "\n")); } catch (e) {} };
+    (async () => {                                  // read server->client control streams (NDJSON)
+      const sr = wt.incomingUnidirectionalStreams.getReader();
+      while (true) { const { value, done } = await sr.read();
+                     if (done || gen !== streamGen) break; readCtrlStream(value); }
+    })().catch(() => {});
+    const pinger = setInterval(() => {              // round-trip latency probe
+      if (gen !== streamGen) { clearInterval(pinger); return; }
+      const id = ++pingId; pingPending.set(id, performance.now());
+      if (pingPending.size > 30) pingPending.clear();
+      ctrlSend({ t: 'ping', id });
+    }, 1000);
 
     // ---- stall watchdog: a stalled encoder (host CPU/GPU contention) or silent packet loss stops
     // frames without closing the session; nudge a keyframe at 2.5s, force a full reconnect at 6s. ----
@@ -227,6 +335,7 @@ function connect(IP_PORT, CERT_B64) {
     let ts = 0, haveKey = false, lastDone = -1;
 
     function onDatagram(buf) {
+      statBytes += buf.byteLength;
       const dv = new DataView(buf.buffer, buf.byteOffset);
       const fid = dv.getUint32(0), flags = dv.getUint8(4);
       const n = dv.getUint16(5), idx = dv.getUint16(7);
@@ -260,6 +369,106 @@ function connect(IP_PORT, CERT_B64) {
     if (gen === streamGen) dropAndReconnect('stream ended');
   })().catch(e => { console.warn('connect', e); if (gen === streamGen) dropAndReconnect('connect failed'); });
 }
+
+// ================= control panel: stats, explicit clipboard, virtual keyboard =================
+function readCtrlStream(rs) {                       // server->client NDJSON (pong, clip, status)
+  const reader = rs.getReader(), dec = new TextDecoder(); let buf = '';
+  (async () => { try {
+    while (true) { const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true }); let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+        if (line.trim()) { try { onCtrlMsg(JSON.parse(line)); } catch (e) {} } } }
+  } catch (e) {} })();
+}
+function onCtrlMsg(m) {
+  if (m.t === 'pong') { const t0 = pingPending.get(m.id);
+    if (t0 != null) { lastRtt = performance.now() - t0; pingPending.delete(m.id); } }
+  else if (m.t === 'clip') { onRemoteClip(m.text || ''); }
+}
+
+// ---- top-bar stats (always running) ----
+let _lt = performance.now(), _lb = 0, _lf = 0;
+setInterval(() => {
+  const now = performance.now(), dt = (now - _lt) / 1000 || 1; _lt = now;
+  mbpsEl.textContent = (((statBytes - _lb) * 8 / 1e6) / dt).toFixed(1); _lb = statBytes;
+  fpsEl.textContent = Math.round((statFrames - _lf) / dt); _lf = statFrames;
+  rttEl.textContent = lastRtt == null ? '—' : Math.round(lastRtt);
+}, 1000);
+
+// ---- panel toggle ----
+const panel = document.getElementById('panel');
+document.getElementById('ctrlBtn').onclick = () => panel.classList.toggle('open');
+
+// ---- clipboard (EXPLICIT) + history (cap 20 items / 10 MB) ----
+const clipText = document.getElementById('clipText'), clipHist = document.getElementById('clipHist'),
+      clipMsg = document.getElementById('clipMsg'), clipHistInfo = document.getElementById('clipHistInfo');
+const HIST_MAX = 20, HIST_BYTES = 10 * 1024 * 1024;
+let hist = [];
+const flash = t => { clipMsg.textContent = t; setTimeout(() => { if (clipMsg.textContent === t) clipMsg.textContent = ''; }, 2000); };
+function addHist(text, dir) {
+  if (!text) return;
+  hist = hist.filter(h => h.text !== text); hist.unshift({ text, dir });
+  let bytes = 0; hist = hist.filter((h, i) => { bytes += h.text.length; return i < HIST_MAX && bytes <= HIST_BYTES; });
+  renderHist();
+}
+function renderHist() {
+  clipHist.innerHTML = ''; clipHistInfo.textContent = hist.length ? `(${hist.length})` : '';
+  for (const h of hist) {
+    const row = document.createElement('div'); row.className = 'clipItem';
+    const d = document.createElement('span'); d.className = 'dir'; d.textContent = h.dir === '→' ? 'sent' : 'recv';
+    const t = document.createElement('span'); t.className = 'txt'; t.textContent = h.text.replace(/\s+/g, ' ').slice(0, 240);
+    t.title = 'click: copy locally + load above';
+    t.onclick = () => { if (navigator.clipboard) navigator.clipboard.writeText(h.text).catch(() => {}); clipText.value = h.text; flash('copied locally'); };
+    const reuse = document.createElement('span'); reuse.className = 'btn'; reuse.textContent = '→remote';
+    reuse.style.padding = '2px 7px'; reuse.onclick = () => { ctrlSend({ t: 'clip-set', text: h.text }); flash('pushed'); };
+    row.append(d, t, reuse); clipHist.append(row);
+  }
+}
+function onRemoteClip(text) {
+  clipText.value = text;
+  if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+  addHist(text, '←'); flash('pulled from remote');
+}
+document.getElementById('clipPush').onclick = () => {
+  const text = clipText.value; if (!text) return;
+  ctrlSend({ t: 'clip-set', text }); addHist(text, '→'); flash('pushed to remote');
+};
+document.getElementById('clipPull').onclick = () => { ctrlSend({ t: 'clip-get' }); flash('requesting…'); };
+
+// ---- virtual keyboard (US) with sticky modifiers + Ctrl-Alt-Del ----
+const KSYM = { Esc:0xFF1B, Tab:0xFF09, Bksp:0xFF08, Enter:0xFF0D, Space:0x20, Del:0xFFFF,
+  Up:0xFF52, Down:0xFF54, Left:0xFF51, Right:0xFF53, Ctrl:0xFFE3, Alt:0xFFE9, Shift:0xFFE1 };
+const kdown = k => sendInput(new Uint8Array([5, (k >> 8) & 255, k & 255]));
+const kup   = k => sendInput(new Uint8Array([6, (k >> 8) & 255, k & 255]));
+const held = new Map();                    // modifier keysym -> key element (currently held)
+function tapKey(k) { kdown(k); kup(k);     // normal key, then release any sticky modifiers
+  for (const [mk, el] of held) { kup(mk); el.classList.remove('held'); } held.clear(); }
+function toggleMod(k, el) {
+  if (held.has(k)) { kup(k); el.classList.remove('held'); held.delete(k); }
+  else { kdown(k); el.classList.add('held'); held.set(k, el); }
+}
+const KROWS = [
+  [['Esc','Esc'],['1','1'],['2','2'],['3','3'],['4','4'],['5','5'],['6','6'],['7','7'],['8','8'],['9','9'],['0','0'],['-','-'],['=','='],['⌫','Bksp','wide']],
+  [['Tab','Tab','wide'],['q','q'],['w','w'],['e','e'],['r','r'],['t','t'],['y','y'],['u','u'],['i','i'],['o','o'],['p','p'],['[','['],[']',']']],
+  [['Ctrl','Ctrl','wide'],['a','a'],['s','s'],['d','d'],['f','f'],['g','g'],['h','h'],['j','j'],['k','k'],['l','l'],[';',';'],["'","'"],['⏎','Enter','wide']],
+  [['Shift','Shift','wide'],['z','z'],['x','x'],['c','c'],['v','v'],['b','b'],['n','n'],['m','m'],[',',','],['.','.'],['/','/'],['↑','Up']],
+  [['Alt','Alt','wide'],['Space','Space','wide'],['←','Left'],['↓','Down'],['→','Right']],
+];
+const vkbd = document.getElementById('vkbd');
+for (const row of KROWS) {
+  const r = document.createElement('div'); r.className = 'krow';
+  for (const [label, name, wide] of row) {
+    const key = document.createElement('div'); key.className = 'key' + (wide ? ' wide' : ''); key.textContent = label;
+    const sym = (name in KSYM) ? KSYM[name] : name.charCodeAt(0);
+    const isMod = name === 'Ctrl' || name === 'Alt' || name === 'Shift';
+    key.onclick = () => isMod ? toggleMod(sym, key) : tapKey(sym);
+    r.append(key);
+  }
+  vkbd.append(r);
+}
+document.getElementById('cad').onclick = () => {
+  kdown(KSYM.Ctrl); kdown(KSYM.Alt); kdown(KSYM.Del); kup(KSYM.Del); kup(KSYM.Alt); kup(KSYM.Ctrl);
+};
 
 poll();
 </script>
