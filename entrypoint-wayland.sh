@@ -58,7 +58,11 @@ need+=(libgl1 libglx0 libglvnd0 libopengl0)
 # ldd-scanning all 958 Slicer .so. (libhwloc.so.5 is also missing but optional + no 24.04 package.)
 need+=(libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0
        libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-cursor0
-       libxcb-util1 libglu1-mesa libodbc2 libpq5 libpulse-mainloop-glib0)
+       libxcb-util1 libglu1-mesa libodbc2 libpq5 libpulse-mainloop-glib0 libpcre2-16-0)
+# ^ libpcre2-16-0 is the Slicer LAUNCHER executable's Qt5Core dep (UTF-16 PCRE2); without it the
+# launcher dies "libpcre2-16.so.0 not found" before it can even exec SlicerApp-real. (Missed by an
+# earlier *.so-only scan because it's an EXECUTABLE dep, not a .so dep.) ldd of all execs + 958 .so
+# is now clean except optional libhwloc.so.5 (a perf/TBB dep with no 24.04 package; non-fatal).
 # Install straight from the base image's existing package lists (fast); only fall back to a slow
 # `apt-get update` if that fails (stale/cleaned lists). The vast base's lists are usually fresh.
 if [ ${#need[@]} -gt 0 ]; then
