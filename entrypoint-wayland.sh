@@ -34,6 +34,7 @@ command -v wmctrl        >/dev/null 2>&1 || need+=(wmctrl)
 command -v xwallpaper    >/dev/null 2>&1 || need+=(xwallpaper)           # set the (CI-rendered) splash PNG (lighter than feh)
 command -v xsetroot      >/dev/null 2>&1 || need+=(x11-xserver-utils)    # splash fallback (solid bg)
 command -v xterm         >/dev/null 2>&1 || need+=(xterm)
+command -v pcmanfm       >/dev/null 2>&1 || need+=(pcmanfm)             # lightweight file manager; drag-drop files into Slicer
 command -v obconf        >/dev/null 2>&1 || need+=(obconf)
 command -v vulkaninfo    >/dev/null 2>&1 || need+=(vulkan-tools libvulkan1)
 command -v sudo          >/dev/null 2>&1 || need+=(sudo)

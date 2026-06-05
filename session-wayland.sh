@@ -33,13 +33,17 @@ export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.js
 export DISPLAY=:2
 ulimit -n 65536 2>/dev/null || true
 
-# --- openbox menu: Terminal, Chrome, Slicer, WM settings (no exit) ---
+# --- user folders for downloads / data to drag into Slicer (HOME is /home/user) ---
+mkdir -p ~/Data ~/Downloads
+
+# --- openbox menu: Terminal, Files, Chrome, Slicer, WM settings (no exit) ---
 mkdir -p ~/.config/openbox
 cat > ~/.config/openbox/menu.xml <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_menu xmlns="http://openbox.org/3.4/menu">
   <menu id="root-menu" label="Desktopia">
     <item label="Terminal"><action name="Execute"><command>xterm</command></action></item>
+    <item label="Files"><action name="Execute"><command>pcmanfm /home/user</command></action></item>
     <item label="Google Chrome"><action name="Execute"><command>google-chrome --no-sandbox --no-first-run --no-default-browser-check</command></action></item>
     <item label="3D Slicer"><action name="Execute"><command>sh -c 'D=$(ls -d /opt/Slicer-*/ 2>/dev/null | head -1); exec "$D/Slicer" --no-splash'</command></action></item>
     <separator/>
@@ -79,6 +83,9 @@ setbg "$SPLASH"
     "$SDIR/Slicer" --no-splash >/tmp/slicer.log 2>&1 &
     sleep 8; wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz 2>/dev/null || true
     setbg "$BG"
+    # file browser, launched AFTER Slicer is maximized so it floats on top (drag files onto Slicer).
+    # NOT --desktop (that would fight our xwallpaper background).
+    command -v pcmanfm >/dev/null 2>&1 && pcmanfm /home/user >/tmp/pcmanfm.log 2>&1 &
   else
     glxgears >/tmp/glxgears.log 2>&1 &
   fi
