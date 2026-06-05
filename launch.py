@@ -22,7 +22,10 @@ STATUS   = os.path.join(CLIENT, "status.json")
 API      = os.environ.get("VAST_URL", "https://console.vast.ai")
 KEY      = open(os.path.expanduser("~/.config/vastai/vast_api_key")).read().strip()
 SSH_KEY  = os.path.expanduser(os.environ.get("DESKTOPIA_SSH_KEY", "~/.ssh/vast-ai-rsa"))
-BASE_IMG = "vastai/linux-desktop:cuda-12.9-ubuntu24.04-2026-05-21"
+# Thin managed base (~1.31 GB) vs the old linux-desktop (~5.48 GB): same managed-ssh-by-reference,
+# 24.04 (matches compositor ABI), GPU/NVENC/GL come from the host-injected driver (stock just omits
+# the unused CUDA dev toolkit). py312 variant guarantees a system python3 the onstart needs.
+BASE_IMG = "vastai/base-image:stock-ubuntu24.04-py312-2026-06-04"
 ENVOPTS  = "-p 4433:4433/udp -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE_DEVICES=all"
 # vast's image tries `sed s/StrictModes yes/StrictModes no/` but the stock line is COMMENTED, so
 # StrictModes stays ON and sshd enforces authorized_keys ownership+modes. vast intermittently leaves

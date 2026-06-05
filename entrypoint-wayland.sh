@@ -20,6 +20,13 @@ sleep 1
 
 # --- deps (root) ---
 need=()
+# Thin-base essentials: vastai/base-image:stock is much smaller than linux-desktop and may lack these.
+# The onstart itself uses curl+python3 to fetch the compositor and pip3 for aioquic, so they must land
+# in this first apt pass (the desktop image shipped them preinstalled).
+command -v curl    >/dev/null 2>&1 || need+=(curl ca-certificates)
+command -v tar     >/dev/null 2>&1 || need+=(tar)
+command -v python3 >/dev/null 2>&1 || need+=(python3)
+command -v pip3    >/dev/null 2>&1 || need+=(python3-pip)
 gst-inspect-1.0 x264enc >/dev/null 2>&1 || need+=(gstreamer1.0-plugins-ugly gstreamer1.0-libav)
 command -v Xwayland      >/dev/null 2>&1 || need+=(xwayland)
 command -v openbox       >/dev/null 2>&1 || need+=(openbox)
@@ -44,6 +51,14 @@ need+=(libgbm1 libdrm2 libinput10 libseat1 libxkbcommon0 libdisplay-info-dev lib
 # image installed these GLX libs; trimming the onstart deps dropped them -> Qt spews
 # "composeAndFlush: makeCurrent() failed" and Slicer's window never flushes. (regression fix 2026-06-04)
 need+=(libgl1 libglx0 libglvnd0 libopengl0)
+# 3D Slicer (Qt5) runtime system libs the fat desktop base preinstalled but stock-ubuntu24.04 lacks.
+# The Qt xcb PLATFORM-plugin cluster is mandatory (without it Slicer dies at startup:
+# "error while loading shared libraries: libxcb-icccm.so.4" / "could not load the Qt platform plugin
+# xcb"); the trailing four (GLU, ODBC/PG SQL plugins, pulse) are optional plugin deps -- found by
+# ldd-scanning all 958 Slicer .so. (libhwloc.so.5 is also missing but optional + no 24.04 package.)
+need+=(libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0
+       libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-cursor0
+       libxcb-util1 libglu1-mesa libodbc2 libpq5 libpulse-mainloop-glib0)
 # Install straight from the base image's existing package lists (fast); only fall back to a slow
 # `apt-get update` if that fails (stale/cleaned lists). The vast base's lists are usually fresh.
 if [ ${#need[@]} -gt 0 ]; then
