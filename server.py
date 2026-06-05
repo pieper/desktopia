@@ -82,13 +82,17 @@ class Injector:
 
 
 def encoder_bin():
-    """Prefer hardware NVENC; fall back to software x264. Constrain to H.264 High so the
-    browser's WebCodecs config (avc1.640028) matches. byte-stream/AU for Annex-B framing."""
-    caps = "video/x-h264,profile=high,stream-format=byte-stream,alignment=au"
-    if Gst.ElementFactory.find("nvh264enc"):
-        return f"nvh264enc name=enc bitrate=8000 ! {caps}"
-    return ("x264enc name=enc tune=zerolatency speed-preset=veryfast bitrate=8000 "
-            f"key-int-max={FPS} ! {caps}")
+    """Prefer hardware NVENC; fall back to software x264. h264parse config-interval=-1 prepends
+    SPS/PPS to EVERY keyframe, so a client that connects (or reconnects) mid-stream gets a
+    self-contained IDR it can actually decode -- without it x264enc emits AUD+IDR with no parameter
+    sets except at stream start, and every late joiner silently decodes nothing (consumes frames,
+    0 output, no error). Constrain to H.264 High (browser WebCodecs avc1.640028); byte-stream/AU =
+    Annex-B framing."""
+    enc = ("nvh264enc name=enc bitrate=8000" if Gst.ElementFactory.find("nvh264enc")
+           else f"x264enc name=enc tune=zerolatency speed-preset=veryfast bitrate=8000 key-int-max={FPS}")
+    return (f"{enc} ! video/x-h264,profile=high "
+            "! h264parse config-interval=-1 "
+            "! video/x-h264,stream-format=byte-stream,alignment=au")
 
 
 def render_node():
