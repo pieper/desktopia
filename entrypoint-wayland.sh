@@ -39,6 +39,11 @@ python3 -c 'import Xlib'  2>/dev/null     || need+=(python3-xlib)
 python3 -c 'import gi; gi.require_version("Gst","1.0")' 2>/dev/null || need+=(python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0)
 gst-inspect-1.0 videoconvert >/dev/null 2>&1 || need+=(gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-tools gstreamer1.0-x)
 need+=(libgbm1 libdrm2 libinput10 libseat1 libxkbcommon0 libdisplay-info-dev libegl1 libgles2)
+# Slicer is an X11/GLX client: it needs the GLVND GLX dispatch (libGL.so.1 / libGLX.so.0) to reach
+# the NVIDIA driver's libGLX_nvidia. The deps above are only the compositor's EGL/GLES. The OLD baked
+# image installed these GLX libs; trimming the onstart deps dropped them -> Qt spews
+# "composeAndFlush: makeCurrent() failed" and Slicer's window never flushes. (regression fix 2026-06-04)
+need+=(libgl1 libglx0 libglvnd0 libopengl0)
 # Install straight from the base image's existing package lists (fast); only fall back to a slow
 # `apt-get update` if that fails (stale/cleaned lists). The vast base's lists are usually fresh.
 if [ ${#need[@]} -gt 0 ]; then
