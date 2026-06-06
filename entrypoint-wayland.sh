@@ -106,6 +106,12 @@ mkdir -p /home/user && chown -R user:user /home/user
 # whatever group actually owns it, or the headless compositor can't open it (empty DMA formats).
 RNODE_GRPS=$(ls /dev/dri/renderD* 2>/dev/null | xargs -r -n1 stat -c %G 2>/dev/null | sort -u | paste -sd, -)
 usermod -aG "sudo,video,render,audio${RNODE_GRPS:+,$RNODE_GRPS}" user 2>/dev/null || true
+# On some hosts (NRP/K8s) the GPU render node has a numeric GID with no named group in the container,
+# so the group-add above can't grant it (compositor then gets EACCES on /dev/dri/renderD*). We run as
+# root here (before dropping to 'user'), so just make the device nodes world-rw — robust everywhere,
+# harmless on hosts where the group already worked (vast). sudo -u user drops supplemental groups, so a
+# k8s supplementalGroups wouldn't survive it anyway; chmod on the node does.
+chmod a+rw /dev/dri/renderD* /dev/dri/card* 2>/dev/null || true
 echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/desktopia-user; chmod 440 /etc/sudoers.d/desktopia-user
 
 # --- stage the scripts where 'user' can read them (avoids /root being root-only) ---
