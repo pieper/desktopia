@@ -22,8 +22,9 @@ spec:
   containers:
     - name: desktopia
       image: ubuntu:24.04                         # generic; we install + run our stack at runtime (no custom image)
-      # wait for the pushed code, then run the stack (the GPU gets used as soon as Slicer renders)
-      command: ["bash","-lc","until [ -f /opt/desktopia/entrypoint-wayland.sh ]; do echo 'waiting for code (tar|kubectl exec)…'; sleep 2; done; cd /opt/desktopia && exec bash entrypoint-wayland.sh"]
+      # wait for the pushed code, run the stack, then STAY ALIVE on exit so a crash doesn't restart the
+      # container (which would wipe the pushed code) — lets us exec in and read /tmp/*.log + re-run.
+      command: ["bash","-lc","until [ -f /opt/desktopia/entrypoint-wayland.sh ]; do echo waiting-for-code; sleep 2; done; cd /opt/desktopia; bash entrypoint-wayland.sh; echo STACK-EXITED-staying-up-for-debug; sleep 86400"]
       env:
         - { name: NVIDIA_DRIVER_CAPABILITIES, value: "all" }  # CRITICAL: graphics/display caps for EGL/GL + NVENC
         - { name: DESKTOPIA_WS_PLAIN,  value: "1" }           # ingress terminates TLS; serve plain ws
@@ -34,10 +35,12 @@ spec:
       resources:
         limits:   { nvidia.com/gpu: "1", cpu: "8", memory: "16Gi", ephemeral-storage: "24Gi" }
         requests: { nvidia.com/gpu: "1", cpu: "4", memory: "8Gi",  ephemeral-storage: "24Gi" }
-      # If the compositor logs `Supported DMA formats: []`, the GPU render node isn't visible; add a
-      # render-node device mount (and if Pod Security Admission blocks it, ask NRP admins on Matrix):
-      #   volumeMounts: [{ name: dri, mountPath: /dev/dri }]
-  # volumes: [{ name: dri, hostPath: { path: /dev/dri } }]
+      volumeMounts:
+        - { name: src, mountPath: /opt/desktopia }   # emptyDir -> pushed code survives container restarts
+        # - { name: dri, mountPath: /dev/dri }        # uncomment if compositor reports empty DMA formats
+  volumes:
+    - { name: src, emptyDir: {} }
+    # - { name: dri, hostPath: { path: /dev/dri } }   # if PodSecurity blocks the hostPath, ask NRP admins (Matrix)
 ---
 apiVersion: v1
 kind: Service
