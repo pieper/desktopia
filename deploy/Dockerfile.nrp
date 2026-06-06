@@ -1,14 +1,13 @@
-# Desktopia image for Kubernetes hosts (NRP/Nautilus). Unlike vast (base-by-reference + onstart),
-# K8s needs a runnable image. PoC build: thin base + our scripts; entrypoint-wayland.sh installs deps
-# and fetches the compositor (GHCR) + Slicer at first run. (Bake those in later for faster cold pods.)
+# FUTURE / NOT USED FOR TESTING. The current NRP test path is deploy/nrp-desktopia.yaml — a stock
+# ubuntu:24.04 pod that installs + runs the stack at runtime (push code with tar|kubectl exec). Once the
+# pieces are proven on NRP, bake this self-contained image (FROM vanilla ubuntu, everything at build
+# time -> fast cold pods, runs without runtime downloads) and push to GHCR via CI.
 #
-# Build + push to the NRP in-cluster registry (fast pulls on Nautilus nodes):
-#   docker build -f deploy/Dockerfile.nrp -t gitlab-registry.nrp-nautilus.io/<you>/desktopia:latest .
-#   docker push gitlab-registry.nrp-nautilus.io/<you>/desktopia:latest
-FROM vastai/base-image:stock-ubuntu24.04-py312-2026-06-04
+#   docker build -f deploy/Dockerfile.nrp -t ghcr.io/pieper/desktopia:nrp .   # (or via GitHub Actions)
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
 COPY . /opt/desktopia
-WORKDIR /opt/desktopia
-# WS served plain (the NRP ingress terminates TLS); pod serves the client page on 8080.
-ENV DESKTOPIA_WS_PLAIN=1 DESKTOPIA_HTTP_PORT=8080
+RUN bash /opt/desktopia/deploy/build-image.sh
+ENV DESKTOPIA_WS_PLAIN=1 DESKTOPIA_HTTP_PORT=8080 NVIDIA_DRIVER_CAPABILITIES=all
 EXPOSE 8080 4434
 CMD ["bash", "/opt/desktopia/entrypoint-wayland.sh"]

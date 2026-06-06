@@ -1,9 +1,14 @@
-# Desktopia on NRP/Nautilus @ MGHPCC (namespace slicer-dev, NVIDIA A10). Streams over WebSocket
-# through NRP's HTTPS ingress — no public UDP needed. A GPU Pod (interactive, ~6h cap).
+# Desktopia on NRP/Nautilus @ MGHPCC (namespace slicer-dev, NVIDIA A10) — TEST mode.
+# Uses a STOCK ubuntu:24.04 image (no custom build yet); we push the repo in with tar|kubectl exec,
+# and entrypoint-wayland.sh installs deps + fetches the compositor/Slicer + launches at runtime.
+# Streams over WebSocket through NRP's HTTPS ingress (no public UDP needed).
 #
-#   1) build+push the image (see deploy/README.md), then set <DOCKERHUB> below
-#   2) kubectl apply -f deploy/nrp-desktopia.yaml
-#   3) open https://desktopia-slicer-dev.nrp-nautilus.io/
+#   kubectl apply -f deploy/nrp-desktopia.yaml
+#   kubectl get pod desktopia -n slicer-dev -w                       # wait for Running
+#   tar czf - --exclude=.git --exclude=.venv --exclude=__pycache__ . \
+#     | kubectl exec -i -n slicer-dev desktopia -- bash -c 'mkdir -p /opt/desktopia && tar xzf - -C /opt/desktopia'
+#   kubectl logs -f desktopia -n slicer-dev
+#   open https://desktopia-slicer-dev.nrp-nautilus.io/
 apiVersion: v1
 kind: Pod
 metadata:
@@ -12,19 +17,20 @@ metadata:
   labels: { app: desktopia }
 spec:
   nodeSelector:
-    topology.kubernetes.io/zone: mghpcc          # pin to MGHPCC (gpu-01..18); region us-east
+    topology.kubernetes.io/zone: mghpcc          # MGHPCC (gpu-01..18); region us-east
     nvidia.com/gpu.product: NVIDIA-A10
   containers:
     - name: desktopia
-      image: docker.io/<DOCKERHUB>/desktopia:latest   # <-- your pushed image
-      imagePullPolicy: IfNotPresent                    # node-local cache = fast warm starts (bump tag to update)
+      image: ubuntu:24.04                         # generic; we install + run our stack at runtime (no custom image)
+      # wait for the pushed code, then run the stack (the GPU gets used as soon as Slicer renders)
+      command: ["bash","-lc","until [ -f /opt/desktopia/entrypoint-wayland.sh ]; do echo 'waiting for code (tar|kubectl exec)…'; sleep 2; done; cd /opt/desktopia && exec bash entrypoint-wayland.sh"]
       env:
         - { name: NVIDIA_DRIVER_CAPABILITIES, value: "all" }  # CRITICAL: graphics/display caps for EGL/GL + NVENC
         - { name: DESKTOPIA_WS_PLAIN,  value: "1" }           # ingress terminates TLS; serve plain ws
         - { name: DESKTOPIA_HTTP_PORT, value: "8080" }        # pod serves the client page here
       ports:
-        - { containerPort: 8080 }                    # client page (index.html + status.json)
-        - { containerPort: 4434 }                    # websocket video/input/control
+        - { containerPort: 8080 }                  # client page (index.html + status.json)
+        - { containerPort: 4434 }                  # websocket video/input/control
       resources:
         limits:   { nvidia.com/gpu: "1", cpu: "8", memory: "16Gi", ephemeral-storage: "24Gi" }
         requests: { nvidia.com/gpu: "1", cpu: "4", memory: "8Gi",  ephemeral-storage: "24Gi" }
