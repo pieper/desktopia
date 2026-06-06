@@ -24,7 +24,7 @@ Gst.init(None)
 MTU = 1100                          # safe QUIC datagram payload (path MTU ~1200)
 HDR = struct.Struct(">IBHH")        # frame_id(u32), flags(u8), n_chunks(u16), chunk_idx(u16)
 FLAG_KEY = 0x01
-W, H, FPS = 1920, 1080, 30
+W, H, FPS = 1920, 1080, 60        # capture+encode rate; also the keyframe interval (key-int-max=FPS = 1s)
 
 # Client->server input protocol (reliable stream), fixed length per message type:
 #  0 keyframe-req[1]  1 move[1+x:u16+y:u16]  2 mousedown[1+btn]  3 mouseup[1+btn]
@@ -110,8 +110,8 @@ def encoder_bin():
     sets except at stream start, and every late joiner silently decodes nothing (consumes frames,
     0 output, no error). Constrain to H.264 High (browser WebCodecs avc1.640028); byte-stream/AU =
     Annex-B framing."""
-    enc = ("nvh264enc name=enc bitrate=8000" if Gst.ElementFactory.find("nvh264enc")
-           else f"x264enc name=enc tune=zerolatency speed-preset=veryfast bitrate=8000 key-int-max={FPS}")
+    enc = ("nvh264enc name=enc bitrate=12000" if Gst.ElementFactory.find("nvh264enc")
+           else f"x264enc name=enc tune=zerolatency speed-preset=veryfast bitrate=12000 key-int-max={FPS}")
     return (f"{enc} ! video/x-h264,profile=high "
             "! h264parse config-interval=-1 "
             "! video/x-h264,stream-format=byte-stream,alignment=au")
