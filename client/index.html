@@ -44,6 +44,8 @@
     background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.14); user-select: none; }
   .btn:hover { background: rgba(255,255,255,0.16); }
   .btn.accent { background: rgba(108,198,255,0.20); border-color: rgba(108,198,255,0.40); }
+  .btn.active { background: rgba(127,224,160,0.22); border-color: rgba(127,224,160,0.5); color: #bfe6cf; }
+  .btn.disabled { opacity: .4; pointer-events: none; }
   .hint { font-size: 11px; color: #6a6a82; }
   #clipHist { display: flex; flex-direction: column; gap: 6px; max-height: 170px; overflow-y: auto; }
   .clipItem { display: flex; gap: 8px; align-items: center; background: rgba(0,0,0,0.25);
@@ -85,10 +87,19 @@
   <span class="stat"><b id="fps">—</b> <span class="u">fps</span></span>
   <span class="stat"><b id="mbps">—</b> <span class="u">Mbps</span></span>
   <span class="stat"><b id="rtt">—</b> <span class="u">ms&nbsp;rtt</span></span>
+  <span class="stat"><b id="xport">—</b></span>
   <span class="spacer"></span>
   <span id="ctrlBtn">⌨&nbsp;&nbsp;Controls</span>
 </div>
 <div id="panel">
+  <section>
+    <h3>Transport <span class="hint" id="xportHint"></span></h3>
+    <div class="row">
+      <span class="btn" id="btWT">WebTransport · UDP</span>
+      <span class="btn" id="btWS">WebSocket · TCP</span>
+    </div>
+    <div class="hint">switch live if UDP is blocked/laggy; greyed = not available on this host</div>
+  </section>
   <section>
     <h3>Clipboard <span class="hint">— explicit, nothing auto-syncs</span></h3>
     <textarea id="clipText" placeholder="Type or paste here, then Push to set the remote clipboard…"></textarea>
@@ -197,7 +208,7 @@ async function poll() {
     subEl.textContent = s.headline || '';
     setPane(logD, s.log_daemon);
     setPane(logC, s.log_container);
-    if (s.ready && (s.transport === 'websocket' || (s.ip_port && s.cert))) { connect(s); return; }
+    if (s.ready && (s.transport === 'websocket' || (s.ip_port && s.cert))) { lastStatus = s; connect(s); return; }
   } else {
     phaseEl.textContent = 'waiting for launcher…';
   }
@@ -209,6 +220,7 @@ async function poll() {
 let streamGen = 0;          // bumped each (re)connect; stale async closures bail when gen != streamGen
 let reconnectGen = -1;      // dedupes multiple drop signals (wt.closed + reader-end + watchdog) per session
 let curConn = null, curDecoder = null, watchdogTimer = null, lastFrameAt = 0;   // curConn: wt or ws (both have .close())
+let preferredTransport = null, lastStatus = null, activeTransport = '';         // live transport switching
 
 function dropAndReconnect(reason) {
   if (reconnectGen === streamGen) return;        // already tearing this session down
@@ -272,7 +284,11 @@ setupInput();
 
 // ---- Phase 2: connect — dispatch to WebTransport (QUIC/UDP) or WebSocket (TCP/WSS). ----
 function connect(s) {
-  if (s.transport === 'websocket') {              // derive a same-origin wss URL if none given (NRP ingress)
+  const wtOK = !!(s.ip_port && s.cert), wsOK = !!s.ws || location.protocol === 'https:';
+  let t = preferredTransport || s.transport || (wtOK ? 'webtransport' : 'websocket');
+  if (t === 'webtransport' && !wtOK) t = 'websocket';      // fall back to whatever's available here
+  if (t === 'websocket' && !wsOK) t = 'webtransport';
+  if (t === 'websocket') {                                 // derive a same-origin wss URL if none given (NRP)
     s.ws = s.ws || ('wss://' + location.host + '/ws');
     return connectWS(s);
   }
@@ -283,6 +299,7 @@ function connectWT(s) {
   const gen = ++streamGen;
   if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
   phaseEl.textContent = 'Connecting to stream…';
+  activeTransport = 'webtransport'; renderTransport();
   let firstFrame = false;
   const decoder = new VideoDecoder({
     output: f => { if (gen !== streamGen) { f.close(); return; }
@@ -386,6 +403,7 @@ function connectWS(s) {
   const gen = ++streamGen;
   if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
   phaseEl.textContent = 'Connecting (WebSocket)…';
+  activeTransport = 'websocket'; renderTransport();
   let firstFrame = false, haveKey = false, ts = 0;
   const decoder = new VideoDecoder({
     output: f => { if (gen !== streamGen) { f.close(); return; }
@@ -461,6 +479,30 @@ setInterval(() => {
 // ---- panel toggle ----
 const panel = document.getElementById('panel');
 document.getElementById('ctrlBtn').onclick = () => panel.classList.toggle('open');
+
+// ---- live transport switching (server serves BOTH QUIC + WS; the panel just reconnects via the other) ----
+const btWT = document.getElementById('btWT'), btWS = document.getElementById('btWS'),
+      xportHint = document.getElementById('xportHint'), xportEl = document.getElementById('xport');
+function renderTransport() {
+  const s = lastStatus || {};
+  const wtOK = !!(s.ip_port && s.cert), wsOK = !!s.ws || location.protocol === 'https:';
+  btWT.classList.toggle('active', activeTransport === 'webtransport');
+  btWS.classList.toggle('active', activeTransport === 'websocket');
+  btWT.classList.toggle('disabled', !wtOK);
+  btWS.classList.toggle('disabled', !wsOK);
+  if (xportEl) xportEl.textContent = activeTransport === 'websocket' ? 'TCP' : activeTransport === 'webtransport' ? 'UDP' : '—';
+  xportHint.textContent = activeTransport === 'websocket' ? '(WebSocket)' : activeTransport === 'webtransport' ? '(WebTransport)' : '';
+}
+function switchTransport(t) {
+  if (!lastStatus || t === activeTransport) return;
+  if (t === 'webtransport' && !(lastStatus.ip_port && lastStatus.cert)) return;
+  if (t === 'websocket' && !(lastStatus.ws || location.protocol === 'https:')) return;
+  preferredTransport = t;                          // persists across reconnects until toggled again
+  dropAndReconnect('switching to ' + (t === 'websocket' ? 'WebSocket · TCP' : 'WebTransport · UDP'));
+}
+btWT.onclick = () => switchTransport('webtransport');
+btWS.onclick = () => switchTransport('websocket');
+renderTransport();
 
 // ---- clipboard (EXPLICIT) + history (cap 20 items / 10 MB) ----
 const clipText = document.getElementById('clipText'), clipHist = document.getElementById('clipHist'),
