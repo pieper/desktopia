@@ -1,5 +1,11 @@
 .git
-client/
-README.md
+.venv
+.claude
 *.pem
+*.log
+*.pyc
 __pycache__/
+.DS_Store
+client/status.json
+# NOTE: client/ is intentionally NOT ignored — deploy/Dockerfile.nrp bakes it in to serve the page.
+# The root Dockerfile (compositor artifact) copies only from its builder stage, so it's unaffected.
