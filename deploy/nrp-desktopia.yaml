@@ -1,0 +1,61 @@
+# Desktopia on NRP/Nautilus (Kubernetes). A GPU Pod (interactive, ~6h cap) that streams over WebSocket
+# through NRP's HTTPS ingress -- no public UDP needed. Replace <NS>, <REGISTRY/IMAGE>, and confirm the
+# region label + a GPU product that exists at MGHPCC (East Coast).
+#
+#   kubectl apply -f deploy/nrp-desktopia.yaml
+#   # then open: https://desktopia-<NS>.nrp-nautilus.io/
+#
+# NOTE: NRP policy says Deployments can't request GPUs, so this is a Pod (6h interactive session).
+# For always-on you'd ask NRP for a Deployment+GPU exception (Matrix).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: desktopia
+  namespace: <NS>
+  labels: { app: desktopia }
+spec:
+  # Pin to MGHPCC (East Coast) for low latency + warm image cache. Confirm the exact region value with:
+  #   kubectl get nodes -L topology.kubernetes.io/region,nvidia.com/gpu.product
+  nodeSelector:
+    topology.kubernetes.io/region: us-east        # <-- confirm/replace
+  containers:
+    - name: desktopia
+      image: <REGISTRY/IMAGE>                      # e.g. gitlab-registry.nrp-nautilus.io/<you>/desktopia:latest
+      imagePullPolicy: IfNotPresent                # use the node-local cache (fast warm starts)
+      env:
+        - { name: DESKTOPIA_WS_PLAIN,  value: "1" }     # ingress terminates TLS; serve plain ws
+        - { name: DESKTOPIA_HTTP_PORT, value: "8080" }  # pod serves the client page here
+      ports:
+        - { containerPort: 8080 }                  # client page (index.html + status.json)
+        - { containerPort: 4434 }                  # websocket video/input/control
+      resources:
+        limits:   { nvidia.com/gpu: 1, cpu: "8", memory: 16Gi, ephemeral-storage: 20Gi }
+        requests: { nvidia.com/gpu: 1, cpu: "4", memory: 8Gi,  ephemeral-storage: 20Gi }
+      # VERIFY on a live pod: the GPU render node (/dev/dri/renderD128) must be visible for the headless
+      # Wayland compositor. If the NVIDIA device plugin doesn't surface it under NRP's Pod Security
+      # Admission, ask admins (Matrix) for a render-node device mount.
+---
+apiVersion: v1
+kind: Service
+metadata: { name: desktopia, namespace: <NS> }
+spec:
+  selector: { app: desktopia }
+  ports:
+    - { name: page, port: 8080, targetPort: 8080 }
+    - { name: ws,   port: 4434, targetPort: 4434 }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: desktopia
+  namespace: <NS>
+spec:
+  ingressClassName: haproxy
+  rules:
+    - host: desktopia-<NS>.nrp-nautilus.io
+      http:
+        paths:
+          - { path: /ws, pathType: Prefix, backend: { service: { name: desktopia, port: { number: 4434 } } } }
+          - { path: /,   pathType: Prefix, backend: { service: { name: desktopia, port: { number: 8080 } } } }
+  tls:
+    - hosts: [ desktopia-<NS>.nrp-nautilus.io ]    # NRP auto-provisions the Let's Encrypt cert

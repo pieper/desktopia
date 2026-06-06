@@ -26,7 +26,7 @@ SSH_KEY  = os.path.expanduser(os.environ.get("DESKTOPIA_SSH_KEY", "~/.ssh/vast-a
 # 24.04 (matches compositor ABI), GPU/NVENC/GL come from the host-injected driver (stock just omits
 # the unused CUDA dev toolkit). py312 variant guarantees a system python3 the onstart needs.
 BASE_IMG = "vastai/base-image:stock-ubuntu24.04-py312-2026-06-04"
-ENVOPTS  = "-p 4433:4433/udp -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE_DEVICES=all"
+ENVOPTS  = "-p 4433:4433/udp -p 4434:4434/tcp -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE_DEVICES=all"
 # vast's image tries `sed s/StrictModes yes/StrictModes no/` but the stock line is COMMENTED, so
 # StrictModes stays ON and sshd enforces authorized_keys ownership+modes. vast intermittently leaves
 # /root/.ssh/authorized_keys owned by a non-root uid -> "bad ownership or modes" -> every key auth
@@ -49,7 +49,8 @@ SOPTS    = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o
             "-i", SSH_KEY]
 
 # ---- status.json (atomic write so the page never reads a half-written file) ----
-_state = {"phase": "Renting a GPU…", "ready": False, "ip_port": "", "cert": "",
+_state = {"phase": "Renting a GPU…", "ready": False, "ip_port": "", "cert": "", "ws": "",
+          "transport": os.environ.get("DESKTOPIA_TRANSPORT", "webtransport"),
           "headline": "", "log_daemon": "", "log_container": ""}
 def write_status(**kw):
     _state.update(kw)
@@ -138,6 +139,11 @@ def stream_endpoint(inst):
     p = (inst.get("ports") or {}).get("4433/udp")
     ip = inst.get("public_ipaddr")
     return f"{ip}:{p[0]['HostPort']}" if (p and ip) else None
+
+def ws_endpoint(inst):              # the WS/TCP transport (wss with our self-signed cert on vast direct)
+    p = (inst.get("ports") or {}).get("4434/tcp")
+    ip = inst.get("public_ipaddr")
+    return f"wss://{ip}:{p[0]['HostPort']}" if (p and ip) else ""
 
 # ---- web server (serves client/ so the page + status.json are reachable) + open Chrome ----
 def serve():
@@ -243,7 +249,8 @@ def main():
 
         dt = int(time.time() - t0)
         refresh_logs(iid)
-        write_status(phase="Connecting to the live stream…", ready=True, ip_port=endpoint, cert=cert)
+        write_status(phase="Connecting to the live stream…", ready=True, ip_port=endpoint, cert=cert,
+                     ws=ws_endpoint(inst), transport=os.environ.get("DESKTOPIA_TRANSPORT", "webtransport"))
         print(f"=== READY === id={iid} stream={endpoint} cert={cert} ready=+{dt}s ({dt//60}m{dt%60}s)",
               flush=True)
         # keep serving so the page can reach status.json / reload during the session

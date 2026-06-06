@@ -72,6 +72,7 @@ if [ ${#need[@]} -gt 0 ]; then
     || { apt-get update -qq && apt-get install -y --no-install-recommends "${need[@]}" >/dev/null 2>&1; }
 fi
 python3 -c 'import aioquic' 2>/dev/null || pip3 install --break-system-packages "aioquic>=1.0" >/dev/null 2>&1
+python3 -c 'import websockets' 2>/dev/null || pip3 install --break-system-packages websockets >/dev/null 2>&1   # WS/TCP transport
 
 # --- prebuilt compositor: fetch + extract the gst-wayland-display plugin + libwayland (~10 MB) from
 # the public GHCR artifact image instead of building it (~13 min). Skipped if already present (a dev

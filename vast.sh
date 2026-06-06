@@ -35,7 +35,7 @@ GHCR_IMAGE="ghcr.io/pieper/desktopia:latest"
 # image loads in seconds, not minutes; it ships nvidia-smi/glxinfo/X/ffmpeg. The built image
 # (GHCR_IMAGE, ./vast.sh up <id> ghcr) instead boots straight into the desktop stream.
 BASE_IMAGE="vastai/linux-desktop:cuda-12.9-ubuntu24.04-2026-05-21"
-ENVOPTS='-p 4433:4433/udp -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE_DEVICES=all'
+ENVOPTS='-p 4433:4433/udp -p 4434:4434/tcp -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE_DEVICES=all'
 # Region matters for interactive latency (motion-to-photon is RTT-bound). Constrain to
 # North America by default; override e.g. SEARCH_GEO='geolocation in [US]' for US-only.
 SEARCH_GEO=${SEARCH_GEO:-'geolocation in [US,CA]'}

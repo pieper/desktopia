@@ -8,8 +8,9 @@ WT stream byte from the client means "send me a keyframe".
 The compositor pipeline starts immediately (so the Wayland socket exists and Xwayland/Slicer can
 render into it) regardless of viewers; datagrams only go out once a browser connects.
 """
-import argparse, asyncio, json, os, struct, subprocess
+import argparse, asyncio, json, os, ssl, struct, subprocess
 import gi
+import websockets       # TCP/WSS transport for hosts that only allow HTTP ingress (e.g. NRP)
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 from aioquic.asyncio import serve
@@ -52,6 +53,24 @@ def clipboard_get():
         return r.stdout.decode("utf-8", "replace")
     except Exception as e:
         print("clip-get failed:", e, flush=True); return ""
+
+
+def dispatch_input(m, inj, b):                  # one fixed-length input message -> XTEST (shared QUIC+WS)
+    if not m: return
+    t = m[0]
+    if   t == 0: b.force_keyframe()
+    elif t == 1 and len(m) >= 5: inj.move((m[1] << 8) | m[2], (m[3] << 8) | m[4])
+    elif t == 2 and len(m) >= 2: inj.button(m[1], True)
+    elif t == 3 and len(m) >= 2: inj.button(m[1], False)
+    elif t == 4 and len(m) >= 2: inj.wheel(m[1] == 1)
+    elif t == 5 and len(m) >= 3: inj.key((m[1] << 8) | m[2], True)
+    elif t == 6 and len(m) >= 3: inj.key((m[1] << 8) | m[2], False)
+
+def handle_control(m, reply, b):                # NDJSON control message (shared QUIC+WS)
+    t = m.get("t")
+    if   t == "ping":     reply({"t": "pong", "id": m.get("id")})       # RTT
+    elif t == "clip-set": clipboard_set(m.get("text", ""))             # explicit push
+    elif t == "clip-get": reply({"t": "clip", "text": clipboard_get()})  # explicit pull
 
 
 class Injector:
@@ -185,13 +204,11 @@ class Broadcaster:
             return
         fid = self.frame_id & 0xFFFFFFFF
         self.frame_id += 1
-        body = MTU - HDR.size
-        chunks = [data[i:i + body] for i in range(0, len(data), body)] or [b""]
-        n = len(chunks)
-        flags = FLAG_KEY if is_key else 0
-        for sp in list(self.sessions):
-            for idx, c in enumerate(chunks):
-                sp.send_video_datagram(HDR.pack(fid, flags, n, idx) + c)
+        for sp in list(self.sessions):           # sessions are QUIC (StreamProtocol) or WS (WSSession)
+            try:
+                sp.send_video(fid, data, is_key)
+            except Exception:
+                pass
 
 
 class StreamProtocol(QuicConnectionProtocol):
@@ -228,14 +245,7 @@ class StreamProtocol(QuicConnectionProtocol):
         self._inbuf = buf[i:]
 
     def _dispatch(self, m):
-        t = m[0]; inj = self.injector
-        if t == 0:   self.broadcaster.force_keyframe()
-        elif t == 1: inj.move((m[1] << 8) | m[2], (m[3] << 8) | m[4])
-        elif t == 2: inj.button(m[1], True)
-        elif t == 3: inj.button(m[1], False)
-        elif t == 4: inj.wheel(m[1] == 1)
-        elif t == 5: inj.key((m[1] << 8) | m[2], True)
-        elif t == 6: inj.key((m[1] << 8) | m[2], False)
+        dispatch_input(m, self.injector, self.broadcaster)
 
     def _parse_control(self):
         while b"\n" in self._ctrlbuf:
@@ -248,13 +258,7 @@ class StreamProtocol(QuicConnectionProtocol):
                 print("ctrl parse:", ex, flush=True)
 
     def _on_control(self, m):
-        t = m.get("t")
-        if t == "ping":
-            self._ctrl_send({"t": "pong", "id": m.get("id")})         # RTT measurement
-        elif t == "clip-set":
-            clipboard_set(m.get("text", ""))                          # explicit push to remote
-        elif t == "clip-get":
-            self._ctrl_send({"t": "clip", "text": clipboard_get()})   # explicit pull from remote
+        handle_control(m, self._ctrl_send, self.broadcaster)
 
     def _ctrl_send(self, obj):
         if self._ctrl_out is None:
@@ -296,6 +300,13 @@ class StreamProtocol(QuicConnectionProtocol):
             elif data:
                 self._ctrlbuf += data; self._parse_control()
 
+    def send_video(self, fid, data, is_key):     # fragment an AU into QUIC datagrams
+        body = MTU - HDR.size
+        chunks = [data[i:i + body] for i in range(0, len(data), body)] or [b""]
+        n = len(chunks); flags = FLAG_KEY if is_key else 0
+        for idx, c in enumerate(chunks):
+            self.send_video_datagram(HDR.pack(fid, flags, n, idx) + c)
+
     def send_video_datagram(self, payload):
         try:
             self._h3.send_datagram(self._session_id, payload)
@@ -309,10 +320,65 @@ class StreamProtocol(QuicConnectionProtocol):
         super().connection_lost(exc)
 
 
+class WSSession:
+    """A browser connected over WebSocket (TCP/WSS) instead of QUIC -- the path for hosts that only
+    expose HTTP ingress (e.g. NRP). Same role as StreamProtocol in broadcaster.sessions. Video out =
+    binary frames (1-byte key flag + whole AU; TCP keeps boundaries, so no fragmentation). Control out
+    = text (NDJSON). In: binary = one input message, text = NDJSON control."""
+    def __init__(self, ws, b, inj):
+        self.ws, self.b, self.inj = ws, b, inj
+        self.q = asyncio.Queue(maxsize=4)        # video+control; drop-oldest on backpressure (slow client)
+        self.task = asyncio.ensure_future(self._writer())
+
+    def send_video(self, fid, data, is_key):
+        self._enqueue((b"\x01" if is_key else b"\x00") + data)
+
+    def _reply(self, obj):
+        self._enqueue(json.dumps(obj))           # str -> WS text frame
+
+    def _enqueue(self, item):
+        try:
+            self.q.put_nowait(item)
+        except asyncio.QueueFull:
+            try: self.q.get_nowait()
+            except Exception: pass
+            try: self.q.put_nowait(item)
+            except Exception: pass
+
+    async def _writer(self):
+        try:
+            while True:
+                await self.ws.send(await self.q.get())
+        except Exception:
+            pass
+
+
+async def ws_handler(ws, *_):                    # *_ tolerates the (ws) or (ws, path) handler signatures
+    b, inj = StreamProtocol.broadcaster, StreamProtocol.injector
+    sess = WSSession(ws, b, inj)
+    b.sessions.add(sess); inj.reset(); b.force_keyframe()
+    print("ws viewer connected; sessions:", len(b.sessions), flush=True)
+    try:
+        async for msg in ws:
+            if isinstance(msg, (bytes, bytearray)):
+                dispatch_input(bytes(msg), inj, b)
+            else:
+                try: handle_control(json.loads(msg), sess._reply, b)
+                except Exception: pass
+    except Exception:
+        pass
+    finally:
+        b.sessions.discard(sess); sess.task.cancel()
+        print("ws viewer left; sessions:", len(b.sessions), flush=True)
+
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cert"); ap.add_argument("--key")
     ap.add_argument("--port", type=int, default=4433)
+    ap.add_argument("--ws-port", type=int, default=4434)
+    ap.add_argument("--ws-plain", action="store_true",   # plain ws:// when an ingress provides https/wss (NRP)
+                    help="serve WebSocket without TLS (a reverse proxy / k8s ingress terminates TLS)")
     args = ap.parse_args()
 
     # idle_timeout reaps a frozen/uncleanly-closed viewer (no QUIC ACKs) in ~25s instead of the 60s
@@ -330,6 +396,16 @@ async def main():
 
     await serve("0.0.0.0", args.port, configuration=cfg, create_protocol=StreamProtocol)
     print(f"WebTransport streamer on udp/{args.port}", flush=True)
+
+    # WebSocket (TCP) transport in parallel -- same AUs, for HTTP-ingress-only hosts (NRP). wss with our
+    # cert by default (direct, e.g. vast); --ws-plain when an ingress terminates TLS upstream.
+    ws_ssl = None
+    if not args.ws_plain:
+        ws_ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ws_ssl.load_cert_chain(args.cert, args.key)
+    await websockets.serve(ws_handler, "0.0.0.0", args.ws_port, ssl=ws_ssl,
+                           max_size=None, compression=None, ping_interval=20, ping_timeout=20)
+    print(f"WebSocket streamer on tcp/{args.ws_port} ({'plain' if args.ws_plain else 'wss'})", flush=True)
     await asyncio.Future()
 
 

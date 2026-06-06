@@ -197,7 +197,7 @@ async function poll() {
     subEl.textContent = s.headline || '';
     setPane(logD, s.log_daemon);
     setPane(logC, s.log_container);
-    if (s.ready && s.ip_port && s.cert) { connect(s.ip_port, s.cert); return; }
+    if (s.ready && (s.transport === 'websocket' || (s.ip_port && s.cert))) { connect(s); return; }
   } else {
     phaseEl.textContent = 'waiting for launcher…';
   }
@@ -208,7 +208,7 @@ async function poll() {
 // so recovering from a dropped session or a stalled stream is just "tear down + re-poll + reconnect".
 let streamGen = 0;          // bumped each (re)connect; stale async closures bail when gen != streamGen
 let reconnectGen = -1;      // dedupes multiple drop signals (wt.closed + reader-end + watchdog) per session
-let curWT = null, curDecoder = null, watchdogTimer = null, lastFrameAt = 0;
+let curConn = null, curDecoder = null, watchdogTimer = null, lastFrameAt = 0;   // curConn: wt or ws (both have .close())
 
 function dropAndReconnect(reason) {
   if (reconnectGen === streamGen) return;        // already tearing this session down
@@ -216,8 +216,8 @@ function dropAndReconnect(reason) {
   if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
   requestKey = () => {};
   try { if (curDecoder && curDecoder.state !== 'closed') curDecoder.close(); } catch (_) {}
-  try { if (curWT) curWT.close(); } catch (_) {}
-  curWT = curDecoder = null;
+  try { if (curConn) curConn.close(); } catch (_) {}
+  curConn = curDecoder = null;
   connEl.classList.remove('ok');
   overlay.classList.remove('hidden');            // Game of Life resumes as the "reconnecting" state
   phaseEl.textContent = 'Reconnecting to the live stream…';
@@ -226,8 +226,60 @@ function dropAndReconnect(reason) {
   setTimeout(poll, 1000);                         // poll re-reads status.json for the current endpoint/cert
 }
 
-// ---- Phase 2: connect the WebTransport / WebCodecs stream; hide the overlay on the first frame ----
-function connect(IP_PORT, CERT_B64) {
+// ---- shared input wiring (set up ONCE; listeners send via the module-level sendInput, which each
+// transport points at its own channel). Defined once so reconnects don't stack duplicate listeners. ----
+function setupInput() {
+  const canvas = document.getElementById('v');
+  canvas.tabIndex = 0;
+  const toBitmap = ev => {                       // map CSS coords -> 1920x1080 (object-fit: contain)
+    const r = canvas.getBoundingClientRect();
+    const s = Math.min(r.width / 1920, r.height / 1080);
+    const ox = (r.width - 1920 * s) / 2, oy = (r.height - 1080 * s) / 2;
+    const x = Math.max(0, Math.min(1919, Math.round((ev.clientX - r.left - ox) / s)));
+    const y = Math.max(0, Math.min(1079, Math.round((ev.clientY - r.top  - oy) / s)));
+    return [x, y];
+  };
+  const move = (x, y) => sendInput(new Uint8Array([1, (x>>8)&255, x&255, (y>>8)&255, y&255]));
+  const btn  = b => (b === 0 ? 1 : b === 1 ? 2 : b === 2 ? 3 : 0);   // L/M/R
+  let last = 0;
+  canvas.addEventListener('pointermove', ev => {
+    const t = performance.now(); if (t - last < 16) return; last = t;   // ~60 Hz
+    const [x, y] = toBitmap(ev); move(x, y);
+  });
+  canvas.addEventListener('pointerdown', ev => {
+    try { canvas.setPointerCapture(ev.pointerId); } catch (_) {}
+    canvas.focus(); const [x,y]=toBitmap(ev); move(x,y); sendInput(new Uint8Array([2, btn(ev.button)]));
+  });
+  canvas.addEventListener('pointerup', ev => {
+    sendInput(new Uint8Array([3, btn(ev.button)]));
+    try { canvas.releasePointerCapture(ev.pointerId); } catch (_) {}
+  });
+  canvas.addEventListener('contextmenu', ev => ev.preventDefault());
+  canvas.addEventListener('wheel', ev => { ev.preventDefault(); sendInput(new Uint8Array([4, ev.deltaY < 0 ? 0 : 1])); }, { passive: false });
+  const KS = { Enter:0xFF0D, Backspace:0xFF08, Tab:0xFF09, Escape:0xFF1B, Delete:0xFFFF,
+    ArrowLeft:0xFF51, ArrowUp:0xFF52, ArrowRight:0xFF53, ArrowDown:0xFF54,
+    Home:0xFF50, End:0xFF57, PageUp:0xFF55, PageDown:0xFF56, Insert:0xFF63,
+    Shift:0xFFE1, Control:0xFFE3, Alt:0xFFE9, Meta:0xFFE7, CapsLock:0xFFE5, ' ':0x20 };
+  const keysym = ev => {
+    if (ev.key in KS) return KS[ev.key];
+    if (ev.key.length === 1) return ev.key.charCodeAt(0);
+    const m = /^F(\d+)$/.exec(ev.key); return m ? 0xFFBE + (+m[1] - 1) : 0;
+  };
+  window.addEventListener('keydown', ev => { const k = keysym(ev); if (k) { ev.preventDefault(); sendInput(new Uint8Array([5, (k>>8)&255, k&255])); } });
+  window.addEventListener('keyup',   ev => { const k = keysym(ev); if (k) { ev.preventDefault(); sendInput(new Uint8Array([6, (k>>8)&255, k&255])); } });
+}
+setupInput();
+
+// ---- Phase 2: connect — dispatch to WebTransport (QUIC/UDP) or WebSocket (TCP/WSS). ----
+function connect(s) {
+  if (s.transport === 'websocket') {              // derive a same-origin wss URL if none given (NRP ingress)
+    s.ws = s.ws || ('wss://' + location.host + '/ws');
+    return connectWS(s);
+  }
+  return connectWT(s);
+}
+// WebTransport (QUIC datagrams) — vast.ai / Jetstream2 (direct public UDP, lowest latency).
+function connectWT(s) {
   const gen = ++streamGen;
   if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
   phaseEl.textContent = 'Connecting to stream…';
@@ -244,10 +296,10 @@ function connect(IP_PORT, CERT_B64) {
   decoder.configure({ codec: "avc1.640028", optimizeForLatency: true });
 
   (async () => {
-    const wt = new WebTransport(`https://${IP_PORT}/stream`, {
-      serverCertificateHashes: [{ algorithm: "sha-256", value: b64(CERT_B64) }]
+    const wt = new WebTransport(`https://${s.ip_port}/stream`, {
+      serverCertificateHashes: [{ algorithm: "sha-256", value: b64(s.cert) }]
     });
-    curWT = wt;
+    curConn = wt;
     await wt.ready;
     if (gen !== streamGen) { try { wt.close(); } catch (_) {} return; }
     // gen-guard: a PREVIOUS session's wt.closed can resolve late, AFTER the new connect() has bumped
@@ -260,8 +312,7 @@ function connect(IP_PORT, CERT_B64) {
     const send = a => inW.write(a).catch(e => console.warn("send fail", e));
     function needKey() { send(new Uint8Array([0x00])); }   // type 0 = keyframe request
     requestKey = needKey;
-    sendInput = send;                               // expose to the control panel (vkbd, Ctrl-Alt-Del)
-    setupInput(send);
+    sendInput = send;                               // input listeners (wired once at init) send via this
 
     // ---- control channel: a 2nd uni-stream tagged 0xC7 -> explicit clipboard + ping/pong RTT ----
     const ctrlW = (await wt.createUnidirectionalStream()).getWriter();
@@ -289,47 +340,6 @@ function connect(IP_PORT, CERT_B64) {
       if (dt > 6000) dropAndReconnect('stream stalled');
       else if (dt > 2500) needKey();
     }, 1000);
-
-    function setupInput(send) {
-      const canvas = document.getElementById('v');
-      canvas.tabIndex = 0; canvas.focus();
-      const toBitmap = ev => {                    // map CSS coords -> 1920x1080 (object-fit: contain)
-        const r = canvas.getBoundingClientRect();
-        const s = Math.min(r.width / 1920, r.height / 1080);
-        const ox = (r.width - 1920 * s) / 2, oy = (r.height - 1080 * s) / 2;
-        const x = Math.max(0, Math.min(1919, Math.round((ev.clientX - r.left - ox) / s)));
-        const y = Math.max(0, Math.min(1079, Math.round((ev.clientY - r.top  - oy) / s)));
-        return [x, y];
-      };
-      const move = (x, y) => send(new Uint8Array([1, (x>>8)&255, x&255, (y>>8)&255, y&255]));
-      const btn  = b => (b === 0 ? 1 : b === 1 ? 2 : b === 2 ? 3 : 0);   // L/M/R
-      let last = 0;
-      canvas.addEventListener('pointermove', ev => {
-        const t = performance.now(); if (t - last < 16) return; last = t;   // ~60 Hz
-        const [x, y] = toBitmap(ev); move(x, y);
-      });
-      canvas.addEventListener('pointerdown', ev => {
-        try { canvas.setPointerCapture(ev.pointerId); } catch (_) {}
-        canvas.focus(); const [x,y]=toBitmap(ev); move(x,y); send(new Uint8Array([2, btn(ev.button)]));
-      });
-      canvas.addEventListener('pointerup', ev => {
-        send(new Uint8Array([3, btn(ev.button)]));
-        try { canvas.releasePointerCapture(ev.pointerId); } catch (_) {}
-      });
-      canvas.addEventListener('contextmenu', ev => ev.preventDefault());
-      canvas.addEventListener('wheel', ev => { ev.preventDefault(); send(new Uint8Array([4, ev.deltaY < 0 ? 0 : 1])); }, { passive: false });
-      const KS = { Enter:0xFF0D, Backspace:0xFF08, Tab:0xFF09, Escape:0xFF1B, Delete:0xFFFF,
-        ArrowLeft:0xFF51, ArrowUp:0xFF52, ArrowRight:0xFF53, ArrowDown:0xFF54,
-        Home:0xFF50, End:0xFF57, PageUp:0xFF55, PageDown:0xFF56, Insert:0xFF63,
-        Shift:0xFFE1, Control:0xFFE3, Alt:0xFFE9, Meta:0xFFE7, CapsLock:0xFFE5, ' ':0x20 };
-      const keysym = ev => {
-        if (ev.key in KS) return KS[ev.key];
-        if (ev.key.length === 1) return ev.key.charCodeAt(0);
-        const m = /^F(\d+)$/.exec(ev.key); return m ? 0xFFBE + (+m[1] - 1) : 0;
-      };
-      window.addEventListener('keydown', ev => { const k = keysym(ev); if (k) { ev.preventDefault(); send(new Uint8Array([5, (k>>8)&255, k&255])); } });
-      window.addEventListener('keyup',   ev => { const k = keysym(ev); if (k) { ev.preventDefault(); send(new Uint8Array([6, (k>>8)&255, k&255])); } });
-    }
 
     const partial = new Map();           // frame_id -> {parts:[], have, n, key}
     let ts = 0, haveKey = false, lastDone = -1;
@@ -368,6 +378,59 @@ function connect(IP_PORT, CERT_B64) {
     }
     if (gen === streamGen) dropAndReconnect('stream ended');
   })().catch(e => { console.warn('connect', e); if (gen === streamGen) dropAndReconnect('connect failed'); });
+}
+
+// WebSocket (TCP/WSS) — NRP and anywhere behind an HTTP reverse proxy. No fragmentation: each binary
+// message is one whole H.264 AU (1-byte key flag + data); text messages are NDJSON control.
+function connectWS(s) {
+  const gen = ++streamGen;
+  if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
+  phaseEl.textContent = 'Connecting (WebSocket)…';
+  let firstFrame = false, haveKey = false, ts = 0;
+  const decoder = new VideoDecoder({
+    output: f => { if (gen !== streamGen) { f.close(); return; }
+                   statFrames++; lastFrameAt = performance.now();
+                   if (!firstFrame) { firstFrame = true; overlay.classList.add('hidden'); connEl.classList.add('ok'); }
+                   ctx.drawImage(f, 0, 0, 1920, 1080); f.close(); },
+    error: e => { console.warn('decode', e); requestKey(); }
+  });
+  curDecoder = decoder;
+  decoder.configure({ codec: "avc1.640028", optimizeForLatency: true });
+
+  let ws;
+  try { ws = new WebSocket(s.ws); } catch (e) { if (gen === streamGen) dropAndReconnect('ws open failed'); return; }
+  ws.binaryType = 'arraybuffer';
+  curConn = { close: () => { try { ws.close(); } catch (_) {} } };
+
+  ws.onopen = () => {
+    if (gen !== streamGen) { try { ws.close(); } catch (_) {} return; }
+    sendInput = a => { try { ws.send(a); } catch (e) {} };                       // binary = one input msg
+    ctrlSend  = obj => { try { ws.send(JSON.stringify(obj)); } catch (e) {} };   // text = NDJSON control
+    requestKey = () => sendInput(new Uint8Array([0x00]));
+    lastFrameAt = performance.now();
+    watchdogTimer = setInterval(() => {
+      if (gen !== streamGen) { clearInterval(watchdogTimer); return; }
+      const dt = performance.now() - lastFrameAt;
+      if (dt > 6000) dropAndReconnect('stream stalled'); else if (dt > 2500) requestKey();
+    }, 1000);
+    const pinger = setInterval(() => {
+      if (gen !== streamGen) { clearInterval(pinger); return; }
+      const id = ++pingId; pingPending.set(id, performance.now());
+      if (pingPending.size > 30) pingPending.clear(); ctrlSend({ t: 'ping', id });
+    }, 1000);
+  };
+  ws.onmessage = ev => {
+    if (gen !== streamGen) return;
+    if (typeof ev.data === 'string') { try { onCtrlMsg(JSON.parse(ev.data)); } catch (e) {} return; }
+    const u = new Uint8Array(ev.data); statBytes += u.byteLength;
+    const isKey = u[0] === 1, au = u.subarray(1);
+    if (!haveKey && !isKey) { requestKey(); return; }            // wait for an entry point
+    if (isKey) haveKey = true;
+    try { decoder.decode(new EncodedVideoChunk({ type: isKey ? 'key' : 'delta', timestamp: ts, data: au })); } catch (e) {}
+    ts += 1e6 / 60;
+  };
+  ws.onclose = () => { if (gen === streamGen) dropAndReconnect('socket closed'); };
+  ws.onerror = () => { if (gen === streamGen) dropAndReconnect('socket error'); };
 }
 
 // ================= control panel: stats, explicit clipboard, virtual keyboard =================
