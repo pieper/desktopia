@@ -97,8 +97,10 @@ case "$cmd" in
       # StrictModes stays ON (vast's `sed s/StrictModes yes/no/` misses the COMMENTED stock line), so
       # sshd enforces authorized_keys OWNERSHIP+modes. vast intermittently leaves it owned by a
       # non-root uid -> "bad ownership or modes" -> key auth refused. chmod alone can't fix it; chown too.
+      # APPLIANCE: onstart auto-runs the full desktop stack if the code is on disk (persists across
+      # vast stop/start) so restarts self-stream with no resume; first rent deploys then launch.py starts it.
       vastai create instance "$offer" --image "$BASE_IMAGE" --env "$ENVOPTS" --disk 40 --ssh --direct \
-        --onstart-cmd 'while :; do chown root:root /root /root/.ssh /root/.ssh/authorized_keys 2>/dev/null; chmod 755 /root 2>/dev/null; chmod 700 /root/.ssh 2>/dev/null; chmod 600 /root/.ssh/authorized_keys 2>/dev/null; sleep 3; done'
+        --onstart-cmd '[ -f /root/desktopia/entrypoint-wayland.sh ] && setsid bash /root/desktopia/entrypoint-wayland.sh >/var/log/desktopia.log 2>&1 & while :; do chown root:root /root /root/.ssh /root/.ssh/authorized_keys 2>/dev/null; chmod 755 /root 2>/dev/null; chmod 700 /root/.ssh 2>/dev/null; chmod 600 /root/.ssh/authorized_keys 2>/dev/null; sleep 3; done'
     fi
     ;;
   ls|list) vastai show instances-v1 ;;

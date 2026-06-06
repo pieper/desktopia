@@ -32,7 +32,13 @@ ENVOPTS  = "-p 4433:4433/udp -e NVIDIA_DRIVER_CAPABILITIES=all -e NVIDIA_VISIBLE
 # /root/.ssh/authorized_keys owned by a non-root uid -> "bad ownership or modes" -> every key auth
 # refused forever. chmod alone can't fix it; we must chown too. Leading echo lands in the CONTAINER
 # log (which we poll) so we can SEE the onstart actually ran.
+# APPLIANCE BOOT: auto-launch the whole desktop stack (compositor, Xwayland, openbox WM, Slicer, QUIC
+# server) on every boot/restart IF the code is on disk. The disk persists across vast stop/start, so
+# after the first launch (which rsyncs the repo to /root/desktopia) every restart self-streams with no
+# resume needed. First rent: the file isn't there yet -> skipped, and launch.py deploys + starts it.
 ONSTART  = ("echo DESKTOPIA-ONSTART-UP; "
+            "[ -f /root/desktopia/entrypoint-wayland.sh ] && "
+            "setsid bash /root/desktopia/entrypoint-wayland.sh >/var/log/desktopia.log 2>&1 & "
             "while :; do "
             "chown root:root /root /root/.ssh /root/.ssh/authorized_keys 2>/dev/null; "
             "chmod 755 /root 2>/dev/null; chmod 700 /root/.ssh 2>/dev/null; "
