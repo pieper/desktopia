@@ -177,6 +177,9 @@ chown user:user "$CERT" "$KEY" 2>/dev/null || true
 
 # --- run the session as 'user' from the staged copy (keeps the TTY for make stream / Ctrl-C).
 # Pass HOME=/home/user explicitly: -H alone proved unreliable on this base (apps fell back to /root). ---
-exec sudo -u user -H \
-  HOME=/home/user DESKTOPIA_PRELOAD="$PRELOAD" DESKTOPIA_CERT="$CERT" DESKTOPIA_KEY="$KEY" \
+# Use `env` to set the vars (reliable regardless of sudoers env policy) and forward the NRP/appliance
+# vars too (DESKTOPIA_WS_PLAIN / DESKTOPIA_HTTP_PORT), which sudo's env-reset would otherwise drop.
+exec sudo -u user -H env HOME=/home/user \
+  DESKTOPIA_PRELOAD="$PRELOAD" DESKTOPIA_CERT="$CERT" DESKTOPIA_KEY="$KEY" \
+  DESKTOPIA_WS_PLAIN="${DESKTOPIA_WS_PLAIN:-}" DESKTOPIA_HTTP_PORT="${DESKTOPIA_HTTP_PORT:-}" \
   bash "$RUN_DIR/session-wayland.sh"
