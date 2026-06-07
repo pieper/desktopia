@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Minimal Openbox config for Desktopia. Only one desktop: the default Openbox mouse bindings switch
+     desktops on a wheel scroll over the root window, which is jarring in a single-screen remote desktop
+     (scrolling near/over the desktop flips workspaces). With one desktop, next/previous are no-ops, and
+     we also drop the Desktop/Root wheel bindings entirely so the wheel only ever reaches the app. -->
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <desktops>
+    <number>1</number>
+    <firstdesk>1</firstdesk>
+    <names><name>Desktopia</name></names>
+  </desktops>
+  <mouse>
+    <!-- Window title bar: keep the usual focus/raise/move; no wheel desktop-switching anywhere. -->
+    <context name="Titlebar">
+      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+      <mousebind button="Left" action="Drag"><action name="Move"/></mousebind>
+    </context>
+    <context name="Client">
+      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+    </context>
+    <context name="Frame">
+      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+    </context>
+    <!-- Desktop/Root: right-click opens the app menu; wheel does NOTHING (no desktop switching). -->
+    <context name="Desktop">
+      <mousebind button="Right" action="Press"><action name="ShowMenu"><menu>root-menu</menu></action></mousebind>
+    </context>
+    <context name="Root">
+      <mousebind button="Right" action="Press"><action name="ShowMenu"><menu>root-menu</menu></action></mousebind>
+    </context>
+  </mouse>
+</openbox_config>

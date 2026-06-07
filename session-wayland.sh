@@ -84,8 +84,12 @@ ulimit -n 65536 2>/dev/null || true
 # --- user folders for downloads / data to drag into Slicer (HOME is /home/user) ---
 mkdir -p ~/Data ~/Downloads
 
-# --- openbox menu: Terminal, Files, Chrome, Slicer, WM settings (no exit) ---
+# --- openbox config: single desktop + no wheel desktop-switching (resources/openbox-rc.xml), so the
+# scroll wheel only ever reaches the app (Slicer) instead of flipping workspaces ---
 mkdir -p ~/.config/openbox
+cp "$(dirname "$0")/resources/openbox-rc.xml" ~/.config/openbox/rc.xml 2>/dev/null || true
+
+# --- openbox menu: Terminal, Files, Chrome, Slicer, WM settings (no exit) ---
 cat > ~/.config/openbox/menu.xml <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_menu xmlns="http://openbox.org/3.4/menu">

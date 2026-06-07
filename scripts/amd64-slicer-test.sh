@@ -35,6 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
       libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-cursor0 \
       libxcb-util1 libodbc2 libpq5 libpulse-mainloop-glib0 libpcre2-16-0 \
+      libxcomposite1 libxdamage1 libxtst6 libasound2t64 libcups2t64 libhwloc15 libnspr4 libnss3 \
  && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /opt && curl -L --retry 3 \
       "https://download.slicer.org/download?os=linux&stability=release" | tar -xz -C /opt \
