@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build-time install for the NRP/Kubernetes image (deploy/Dockerfile.nrp): bake ALL runtime deps +
-# the compositor + 3D Slicer + Chrome + the unprivileged 'user' into a vanilla ubuntu:24.04, so the
+# the compositor + 3D Slicer + the unprivileged 'user' into a vanilla ubuntu:24.04, so the
 # container starts fast with no runtime downloads. The NVIDIA driver itself is injected at runtime by
 # the container runtime (NVIDIA_DRIVER_CAPABILITIES=all) -- only the GLVND dispatch libs are baked.
 #
@@ -44,10 +44,8 @@ mkdir -p /opt
 curl -L --retry 3 "https://download.slicer.org/download?os=linux&stability=release" | tar -xz -C /opt
 ls -d /opt/Slicer-*/
 
-# Google Chrome (deps resolved from apt -- do this before clearing the lists)
-curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-apt-get install -y --no-install-recommends /tmp/chrome.deb
-rm -f /tmp/chrome.deb
+# Chrome is NOT baked in (kept lean) -- the openbox menu's scripts/chrome-launch.sh installs it on
+# first use. See entrypoint-wayland.sh / session-wayland.sh.
 
 # Unprivileged 'user' (real 'user' group, owns its home) + close_range seccomp shim, matching what
 # entrypoint-wayland.sh expects so its runtime guards all skip.

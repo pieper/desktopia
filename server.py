@@ -1,12 +1,18 @@
-"""Desktopia streaming server: GStreamer (Wayland compositor) -> QUIC datagrams (WebTransport).
+"""Desktopia streaming server: GStreamer screen capture -> H.264 -> QUIC datagrams + WebSocket.
 
-Runs gst-wayland-display's `waylanddisplaysrc` (a headless GPU Smithay compositor), encodes
-each frame to H.264 (NVENC if the host allows it, else software x264), fragments each access
-unit into QUIC datagrams, and fans them out to every connected WebTransport session. A reliable
-WT stream byte from the client means "send me a keyframe".
+Two capture sources, chosen by --source (default: auto-detect):
+  - wayland: gst-wayland-display's `waylanddisplaysrc`, a headless GPU Smithay compositor that
+             renders on a DRM render node (hardware GL, NVENC). Xwayland/Slicer are its clients.
+  - xvfb:    `ximagesrc` capturing an existing X server (Xvfb on :2) -- pure software (Mesa
+             llvmpipe), no GPU / no DRM render node. The CPU path for Colab and cheap CPU hosts.
+Auto-detect picks wayland when a render node AND the compositor plugin are present, else xvfb.
 
-The compositor pipeline starts immediately (so the Wayland socket exists and Xwayland/Slicer can
-render into it) regardless of viewers; datagrams only go out once a browser connects.
+Either way each frame is H.264-encoded (NVENC if available, else software x264), fragmented into
+QUIC datagrams (WebTransport) and/or sent whole over WebSocket, and fanned out to every viewer.
+A reliable client byte (type 0) means "send me a keyframe".
+
+In wayland mode the compositor pipeline IS the display, so it must start before Xwayland; in xvfb
+mode Xvfb is started first (by session-wayland.sh) and this server just captures it.
 """
 import argparse, asyncio, concurrent.futures, email.utils, http, json, os, ssl, struct, subprocess
 import gi
@@ -27,7 +33,9 @@ Gst.init(None)
 MTU = 1100                          # safe QUIC datagram payload (path MTU ~1200)
 HDR = struct.Struct(">IBHH")        # frame_id(u32), flags(u8), n_chunks(u16), chunk_idx(u16)
 FLAG_KEY = 0x01
-W, H, FPS = 1920, 1080, 60        # capture+encode rate; also the keyframe interval (key-int-max=FPS = 1s)
+# Defaults for capture size / rate / bitrate (overridable via CLI -- the CPU/Colab path drops these
+# to e.g. 1280x720@15 so software encode keeps up). The keyframe interval is tied to fps (= ~1s).
+DEF_W, DEF_H, DEF_FPS, DEF_BITRATE = 1920, 1080, 60, 12000
 
 # Client->server input protocol (reliable stream), fixed length per message type:
 #  0 keyframe-req[1]  1 move[1+x:u16+y:u16]  2 mousedown[1+btn]  3 mouseup[1+btn]
@@ -131,15 +139,16 @@ class Injector:
             self.key(ks, False)
 
 
-def encoder_bin():
+def encoder_bin(fps, bitrate):
     """Prefer hardware NVENC; fall back to software x264. h264parse config-interval=-1 prepends
     SPS/PPS to EVERY keyframe, so a client that connects (or reconnects) mid-stream gets a
     self-contained IDR it can actually decode -- without it x264enc emits AUD+IDR with no parameter
     sets except at stream start, and every late joiner silently decodes nothing (consumes frames,
-    0 output, no error). Constrain to H.264 High (browser WebCodecs avc1.640028); byte-stream/AU =
-    Annex-B framing."""
-    enc = ("nvh264enc name=enc bitrate=12000" if Gst.ElementFactory.find("nvh264enc")
-           else f"x264enc name=enc tune=zerolatency speed-preset=veryfast bitrate=12000 key-int-max={FPS}")
+    0 output, no error). A fps-length keyframe interval (~1s) also lets the WebSocket path -- which,
+    unlike the datagram path, can't detect a single dropped AU -- self-heal corruption within ~1s.
+    Constrain to H.264 High (browser WebCodecs avc1.640028); byte-stream/AU = Annex-B framing."""
+    enc = (f"nvh264enc name=enc bitrate={bitrate} gop-size={fps}" if Gst.ElementFactory.find("nvh264enc")
+           else f"x264enc name=enc tune=zerolatency speed-preset=veryfast bitrate={bitrate} key-int-max={fps}")
     return (f"{enc} ! video/x-h264,profile=high "
             "! h264parse config-interval=-1 "
             "! video/x-h264,stream-format=byte-stream,alignment=au")
@@ -155,22 +164,43 @@ def render_node():
     return nodes[0] if nodes else "/dev/dri/renderD128"
 
 
-PIPELINE = (
-    f"waylanddisplaysrc render-node={render_node()} "
-    f"! video/x-raw,width={W},height={H},format=RGBx,framerate={FPS}/1 "
-    f"! videoconvert ! {encoder_bin()} "
-    "! appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true"
-)
+def resolve_source(requested):
+    """Decide between the GPU Wayland compositor and the software Xvfb capture. Explicit wins;
+    'auto' uses the GPU path only when BOTH a DRM render node and the compositor plugin exist
+    (so a CUDA-only/no-GPU host like Colab cleanly falls to the software path)."""
+    if requested in ("wayland", "xvfb"):
+        return requested
+    import glob
+    have_node = bool(glob.glob("/dev/dri/renderD*"))
+    have_comp = Gst.ElementFactory.find("waylanddisplaysrc") is not None
+    src = "wayland" if (have_node and have_comp) else "xvfb"
+    print(f"source auto-detect: render_node={have_node} waylanddisplaysrc={have_comp} -> {src}", flush=True)
+    return src
+
+
+def build_pipeline(source, w, h, fps, bitrate, display=":2"):
+    enc = encoder_bin(fps, bitrate)
+    sink = "appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true"
+    if source == "xvfb":
+        # Capture an already-running X server (Xvfb on :2) -- pure software, no DRM render node.
+        # ximagesrc reads the screen at its native WxH (Xvfb is created at the requested size, so no
+        # videoscale needed); use-damage only re-grabs changed regions (cheap for a mostly-static UI).
+        return (f"ximagesrc display-name={display} use-damage=true show-pointer=true "
+                f"! video/x-raw,framerate={fps}/1 ! videoconvert ! {enc} ! {sink}")
+    # wayland: headless GPU Smithay compositor on a DRM render node (hardware GL; Xwayland clients).
+    return (f"waylanddisplaysrc render-node={render_node()} "
+            f"! video/x-raw,width={w},height={h},format=RGBx,framerate={fps}/1 "
+            f"! videoconvert ! {enc} ! {sink}")
 
 
 class Broadcaster:
     """Owns the GStreamer pipeline; pushes encoded AUs to all WebTransport sessions."""
-    def __init__(self, loop):
+    def __init__(self, loop, pipeline):
         self.loop = loop
         self.sessions = set()            # set[StreamProtocol]
         self.frame_id = 0
-        print("pipeline:", PIPELINE, flush=True)
-        self.pipe = Gst.parse_launch(PIPELINE)
+        print("pipeline:", pipeline, flush=True)
+        self.pipe = Gst.parse_launch(pipeline)
         self.enc = self.pipe.get_by_name("enc")
         self.pipe.get_by_name("sink").connect("new-sample", self._on_sample)
         bus = self.pipe.get_bus(); bus.add_signal_watch()
@@ -423,6 +453,12 @@ async def ws_handler(ws, *_):                    # *_ tolerates the (ws) or (ws,
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cert"); ap.add_argument("--key")
+    ap.add_argument("--source", choices=["auto", "wayland", "xvfb"], default="auto",
+                    help="capture source: GPU compositor (wayland), software Xvfb (xvfb), or auto-detect")
+    ap.add_argument("--width", type=int, default=DEF_W)
+    ap.add_argument("--height", type=int, default=DEF_H)
+    ap.add_argument("--fps", type=int, default=DEF_FPS)
+    ap.add_argument("--bitrate", type=int, default=DEF_BITRATE, help="H.264 bitrate in kbit/s")
     ap.add_argument("--port", type=int, default=4433)
     ap.add_argument("--ws-port", type=int, default=4434)
     ap.add_argument("--ws-plain", action="store_true",   # plain ws:// when an ingress provides https/wss (NRP)
@@ -439,11 +475,14 @@ async def main():
                             idle_timeout=25.0)
     cfg.load_cert_chain(args.cert, args.key)
 
+    source = resolve_source(args.source)
+    pipeline = build_pipeline(source, args.width, args.height, args.fps, args.bitrate)
+
     loop = asyncio.get_running_loop()
-    b = Broadcaster(loop)
+    b = Broadcaster(loop, pipeline)
     StreamProtocol.broadcaster = b
-    StreamProtocol.injector = Injector(":2")   # XTEST into the Xwayland hosting Slicer
-    b.start()                                  # start the compositor NOW (so the WL socket appears)
+    StreamProtocol.injector = Injector(":2")   # XTEST into the X server (:2) hosting Slicer
+    b.start()                                  # wayland: starts the compositor NOW (so the WL socket appears)
 
     await serve("0.0.0.0", args.port, configuration=cfg, create_protocol=StreamProtocol)
     print(f"WebTransport streamer on udp/{args.port}", flush=True)

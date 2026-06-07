@@ -147,6 +147,15 @@ const setPane = (el, txt) => {                   // replace text, stick to botto
 };
 const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 let requestKey = () => {};   // set once the input channel is open; called by the decoder on loss
+// Stream resolution is whatever the server captures (1920x1080 on GPU, smaller on the CPU/Colab
+// path). We learn it from the first decoded frame and size the canvas + input mapping to match, so
+// nothing is hardcoded to 1080p. The <canvas> defaults to 1920x1080 until the first frame lands.
+const canvasEl = document.getElementById('v');
+let streamW = canvasEl.width, streamH = canvasEl.height;
+function applyResolution(w, h) {
+  if (!w || !h || (w === streamW && h === streamH && canvasEl.width === w)) return;
+  streamW = w; streamH = h; canvasEl.width = w; canvasEl.height = h;   // resizing clears ctx; fine, next draw repaints
+}
 let ctrlSend = () => {};     // set when the control stream opens; sends NDJSON {t:...} to the server
 let sendInput = () => {};    // the raw input-channel send (used by the on-screen keyboard / Ctrl-Alt-Del)
 let statBytes = 0, statFrames = 0, lastRtt = null, pingId = 0;
@@ -243,12 +252,12 @@ function dropAndReconnect(reason) {
 function setupInput() {
   const canvas = document.getElementById('v');
   canvas.tabIndex = 0;
-  const toBitmap = ev => {                       // map CSS coords -> 1920x1080 (object-fit: contain)
+  const toBitmap = ev => {                       // map CSS coords -> streamW x streamH (object-fit: contain)
     const r = canvas.getBoundingClientRect();
-    const s = Math.min(r.width / 1920, r.height / 1080);
-    const ox = (r.width - 1920 * s) / 2, oy = (r.height - 1080 * s) / 2;
-    const x = Math.max(0, Math.min(1919, Math.round((ev.clientX - r.left - ox) / s)));
-    const y = Math.max(0, Math.min(1079, Math.round((ev.clientY - r.top  - oy) / s)));
+    const s = Math.min(r.width / streamW, r.height / streamH);
+    const ox = (r.width - streamW * s) / 2, oy = (r.height - streamH * s) / 2;
+    const x = Math.max(0, Math.min(streamW - 1, Math.round((ev.clientX - r.left - ox) / s)));
+    const y = Math.max(0, Math.min(streamH - 1, Math.round((ev.clientY - r.top  - oy) / s)));
     return [x, y];
   };
   const move = (x, y) => sendInput(new Uint8Array([1, (x>>8)&255, x&255, (y>>8)&255, y&255]));
@@ -282,14 +291,30 @@ function setupInput() {
 }
 setupInput();
 
+// Derive the WebSocket URL RELATIVE to the current page (resolves to ".../ws" next to index.html),
+// so it works both at an origin root (NRP) and under a path-prefixing proxy (Colab's
+// serve_kernel_port_as_iframe, where the page lives under a long /<prefix>/ path). The server upgrades
+// any path on the WS port, so the exact path doesn't matter as long as it stays under the proxy prefix.
+function defaultWsURL() {
+  const u = new URL('ws', document.baseURI);
+  u.protocol = (u.protocol === 'https:') ? 'wss:' : 'ws:';
+  return u.href;
+}
+// WebSocket is usable whenever we can form a ws(s):// URL -- i.e. the page came over http/https (any
+// origin, incl. http://localhost and the Colab proxy), or the launcher handed us an explicit URL. Only
+// a file:// page (the classic "open client/index.html locally" WebTransport flow) can't use it.
+const wsAvailable = s =>
+  !!(s && s.ws) || (s && s.transport === 'websocket') ||
+  location.protocol === 'https:' || location.protocol === 'http:';
+
 // ---- Phase 2: connect — dispatch to WebTransport (QUIC/UDP) or WebSocket (TCP/WSS). ----
 function connect(s) {
-  const wtOK = !!(s.ip_port && s.cert), wsOK = !!s.ws || location.protocol === 'https:';
+  const wtOK = !!(s.ip_port && s.cert), wsOK = wsAvailable(s);
   let t = preferredTransport || s.transport || (wtOK ? 'webtransport' : 'websocket');
   if (t === 'webtransport' && !wtOK) t = 'websocket';      // fall back to whatever's available here
   if (t === 'websocket' && !wsOK) t = 'webtransport';
-  if (t === 'websocket') {                                 // derive a same-origin wss URL if none given (NRP)
-    s.ws = s.ws || ('wss://' + location.host + '/ws');
+  if (t === 'websocket') {                                 // derive the WS URL relative to THIS page if none given
+    s.ws = s.ws || defaultWsURL();
     return connectWS(s);
   }
   return connectWT(s);
@@ -304,8 +329,9 @@ function connectWT(s) {
   const decoder = new VideoDecoder({
     output: f => { if (gen !== streamGen) { f.close(); return; }
                    statFrames++; lastFrameAt = performance.now();
+                   applyResolution(f.displayWidth || f.codedWidth, f.displayHeight || f.codedHeight);
                    if (!firstFrame) { firstFrame = true; overlay.classList.add('hidden'); connEl.classList.add('ok'); }
-                   ctx.drawImage(f, 0, 0, 1920, 1080); f.close(); },
+                   ctx.drawImage(f, 0, 0, streamW, streamH); f.close(); },
     error: e => { console.warn("decode", e); requestKey(); }
   });
   curDecoder = decoder;
@@ -408,8 +434,9 @@ function connectWS(s) {
   const decoder = new VideoDecoder({
     output: f => { if (gen !== streamGen) { f.close(); return; }
                    statFrames++; lastFrameAt = performance.now();
+                   applyResolution(f.displayWidth || f.codedWidth, f.displayHeight || f.codedHeight);
                    if (!firstFrame) { firstFrame = true; overlay.classList.add('hidden'); connEl.classList.add('ok'); }
-                   ctx.drawImage(f, 0, 0, 1920, 1080); f.close(); },
+                   ctx.drawImage(f, 0, 0, streamW, streamH); f.close(); },
     error: e => { console.warn('decode', e); requestKey(); }
   });
   curDecoder = decoder;
@@ -485,7 +512,7 @@ const btWT = document.getElementById('btWT'), btWS = document.getElementById('bt
       xportHint = document.getElementById('xportHint'), xportEl = document.getElementById('xport');
 function renderTransport() {
   const s = lastStatus || {};
-  const wtOK = !!(s.ip_port && s.cert), wsOK = !!s.ws || location.protocol === 'https:';
+  const wtOK = !!(s.ip_port && s.cert), wsOK = wsAvailable(s);
   btWT.classList.toggle('active', activeTransport === 'webtransport');
   btWS.classList.toggle('active', activeTransport === 'websocket');
   btWT.classList.toggle('disabled', !wtOK);
@@ -496,7 +523,7 @@ function renderTransport() {
 function switchTransport(t) {
   if (!lastStatus || t === activeTransport) return;
   if (t === 'webtransport' && !(lastStatus.ip_port && lastStatus.cert)) return;
-  if (t === 'websocket' && !(lastStatus.ws || location.protocol === 'https:')) return;
+  if (t === 'websocket' && !wsAvailable(lastStatus)) return;
   preferredTransport = t;                          // persists across reconnects until toggled again
   dropAndReconnect('switching to ' + (t === 'websocket' ? 'WebSocket · TCP' : 'WebTransport · UDP'));
 }

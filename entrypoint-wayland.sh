@@ -41,6 +41,13 @@ command -v vulkaninfo    >/dev/null 2>&1 || need+=(vulkan-tools libvulkan1)
 command -v sudo          >/dev/null 2>&1 || need+=(sudo)
 command -v gcc           >/dev/null 2>&1 || need+=(gcc)
 python3 -c 'import Xlib'  2>/dev/null     || need+=(python3-xlib)
+# Software-render fallback (no NVIDIA DRM render node, e.g. Colab / a CPU-only host): a plain Xvfb
+# framebuffer + Mesa llvmpipe for Slicer's OpenGL, captured by server.py's ximagesrc. Only pulled in
+# when there's no render node, so the GPU image stays lean.
+if ! ls /dev/dri/renderD* >/dev/null 2>&1; then
+  command -v Xvfb >/dev/null 2>&1 || need+=(xvfb)
+  need+=(libgl1-mesa-dri)        # llvmpipe software GL (swrast DRI driver)
+fi
 # GStreamer runtime + Python/GI bindings + the prebuilt compositor's shared-lib deps. The old build
 # path (provision-wayland.sh) installed these as a side effect; now that we FETCH the prebuilt
 # compositor instead of building, install them here or server.py fails ("Namespace Gst not available")
@@ -78,7 +85,9 @@ python3 -c 'import websockets' 2>/dev/null || pip3 install --break-system-packag
 # the public GHCR artifact image instead of building it (~13 min). Skipped if already present (a dev
 # box that ran `make wl-setup`). The artifact is a FROM-scratch image whose layers untar to /. ---
 COMPOSITOR_SO=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0/libgstwaylanddisplaysrc.so
-if [ ! -f "$COMPOSITOR_SO" ]; then
+# Only on a GPU host: the compositor needs a DRM render node, so on a no-GPU box (software/Xvfb path)
+# it's useless -- skip the fetch entirely (server.py auto-detects xvfb mode there).
+if ls /dev/dri/renderD* >/dev/null 2>&1 && [ ! -f "$COMPOSITOR_SO" ]; then
   echo "fetching prebuilt compositor..."
   REPO=${DESKTOPIA_COMPOSITOR_REPO:-pieper/desktopia}; TAG=${DESKTOPIA_COMPOSITOR_TAG:-compositor}
   TOK=$(curl -fsSL "https://ghcr.io/token?scope=repository:${REPO}:pull" 2>/dev/null \
@@ -118,18 +127,9 @@ echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/desktopia-user; chmod 440 /e
 RUN_DIR=/home/user/desktopia
 mkdir -p "$RUN_DIR"; cp -rf "$PWD/." "$RUN_DIR/" 2>/dev/null || true; chown -R user:user "$RUN_DIR"
 
-# --- Chrome: no sign-in prompts / promos (managed policy applies to every launch) ---
-mkdir -p /etc/opt/chrome/policies/managed
-cat > /etc/opt/chrome/policies/managed/desktopia.json <<'EOF'
-{
-  "BrowserSignin": 0,
-  "SyncDisabled": true,
-  "PromotionalTabsEnabled": false,
-  "BrowserAddPersonEnabled": false,
-  "MetricsReportingEnabled": false,
-  "DefaultBrowserSettingEnabled": false
-}
-EOF
+# --- Chrome is NOT installed by default (keeps the image lean and the CPU/Colab path minimal). The
+# openbox "Google Chrome" menu item runs scripts/chrome-launch.sh, which downloads+installs Chrome on
+# first use (and writes the no-sign-in/no-promo managed policy) then launches it. ---
 
 # --- close_range() shim: vast seccomp denies close_range with EPERM, breaking GLib g_spawn
 # (openbox menu -> "Failed to close file descriptor"). Make it report ENOSYS so GLib falls back. ---
@@ -147,20 +147,6 @@ if ! ls -d /opt/Slicer-*/ >/dev/null 2>&1; then
   ( echo "fetching 3D Slicer..."; mkdir -p /opt
     curl -L --retry 3 "https://download.slicer.org/download?os=linux&stability=release" \
       | tar -xz -C /opt && echo "Slicer ready" || echo "Slicer fetch failed" ) >/tmp/slicer-fetch.log 2>&1 &
-fi
-
-# --- Google Chrome: the thin base ships only a chromium SNAP stub (won't run in-container); the old
-# desktop base bundled real Chrome. Install the .deb in the background, but WAIT until Slicer is up
-# first (user: don't slow Slicer for Chrome) so the Slicer download + first render get all the
-# bandwidth/CPU. This subshell is backgrounded before the exec below, so it outlives it and gates on
-# the SlicerApp process that session-wayland.sh launches. Menu "Google Chrome" works once it lands. ---
-if ! command -v google-chrome >/dev/null 2>&1; then
-  ( for _ in $(seq 1 600); do pgrep -f SlicerApp-real >/dev/null 2>&1 && break; sleep 2; done
-    sleep 10                                 # let Slicer settle past its heavy startup render
-    echo "installing google-chrome..."
-    curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-      && apt-get install -y --no-install-recommends /tmp/chrome.deb && rm -f /tmp/chrome.deb \
-      && echo "chrome ready" || echo "chrome install failed" ) >/tmp/chrome-install.log 2>&1 &
 fi
 
 # --- persistent WebTransport cert (ECDSA P-256, <=14d). Migrate the old /root cert so the
@@ -182,4 +168,7 @@ chown user:user "$CERT" "$KEY" 2>/dev/null || true
 exec sudo -u user -H env HOME=/home/user \
   DESKTOPIA_PRELOAD="$PRELOAD" DESKTOPIA_CERT="$CERT" DESKTOPIA_KEY="$KEY" \
   DESKTOPIA_WS_PLAIN="${DESKTOPIA_WS_PLAIN:-}" DESKTOPIA_SERVE_PAGE="${DESKTOPIA_SERVE_PAGE:-}" \
+  DESKTOPIA_SOURCE="${DESKTOPIA_SOURCE:-}" DESKTOPIA_WIDTH="${DESKTOPIA_WIDTH:-}" \
+  DESKTOPIA_HEIGHT="${DESKTOPIA_HEIGHT:-}" DESKTOPIA_FPS="${DESKTOPIA_FPS:-}" \
+  DESKTOPIA_BITRATE="${DESKTOPIA_BITRATE:-}" \
   bash "$RUN_DIR/session-wayland.sh"

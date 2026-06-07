@@ -1,5 +1,5 @@
 # Thin wrapper over vast.sh. See vast.sh for details.
-.PHONY: search best up up-best up-ghcr ls ssh sync wl-build wl-fixwayland wl-setup stream port pull status logs stop start down debug
+.PHONY: search best up up-best up-ghcr ls ssh sync wl-build wl-fixwayland wl-setup stream port pull status logs stop start down debug soft-local
 
 # --- rent / connect ---
 search:    ; ./vast.sh search
@@ -27,6 +27,9 @@ logs:      ; ./vast.sh logs
 stop:      ; ./vast.sh stop
 start:     ; ./vast.sh start
 down:      ; ./vast.sh down
+
+# --- software (no-GPU) path: smoke-test Xvfb+ximagesrc+x264+WebSocket locally in Docker ---
+soft-local: ; ./scripts/soft-local.sh     # serves http://localhost:8080 (no GPU / no Slicer needed)
 
 # --- diagnostics (debug_utils/<name>.sh) ---
 debug:     ; ./vast.sh debug $(SCRIPT)    # e.g. make debug SCRIPT=nvenc-check
