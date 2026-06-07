@@ -22,7 +22,8 @@ apt-get install -y --no-install-recommends \
   libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
   libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-cursor0 \
   libxcb-util1 libglu1-mesa libodbc2 libpq5 libpulse-mainloop-glib0 libpcre2-16-0 \
-  libxcomposite1 libxdamage1 libxtst6 libasound2t64 libcups2t64 libhwloc15 libnspr4 libnss3
+  libxcomposite1 libxdamage1 libxtst6 libasound2t64 libcups2t64 libhwloc15 libnspr4 libnss3 \
+  fonts-dejavu-core
 pip3 install --break-system-packages "aioquic>=1.0" websockets
 
 # Prebuilt compositor (.so + libwayland 1.25) from the public GHCR artifact (same one the vast path
