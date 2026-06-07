@@ -10,3 +10,4 @@ __pycache__/
 
 # runtime launcher status
 client/status.json
+.amd64-out/

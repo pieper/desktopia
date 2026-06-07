@@ -366,28 +366,43 @@ class WSSession:
     = text (NDJSON). In: binary = one input message, text = NDJSON control."""
     def __init__(self, ws, b, inj):
         self.ws, self.b, self.inj = ws, b, inj
-        self.q = asyncio.Queue(maxsize=4)        # video+control; drop-oldest on backpressure (slow client)
+        # TWO queues drained by one writer: control (clipboard/pong) is kept OFF the video queue and
+        # sent with strict priority, so a backlog of video AUs can never evict a clipboard reply. Video
+        # is drop-oldest (a slow client should lag, not stall). The writer waits on an Event, NOT on the
+        # video queue: use-damage pauses video on a static screen, and blocking on video would then stall
+        # control replies whenever nothing is rendering.
+        self.vq = asyncio.Queue(maxsize=4)       # whole H.264 AUs; drop-oldest under backpressure
+        self.ctrlq = asyncio.Queue(maxsize=64)   # NDJSON control (tiny, infrequent); effectively lossless
+        self._wake = asyncio.Event()
         self.task = asyncio.ensure_future(self._writer())
 
     def send_video(self, fid, data, is_key):
-        self._enqueue((b"\x01" if is_key else b"\x00") + data)
+        self._put(self.vq, (b"\x01" if is_key else b"\x00") + data)
 
     def _reply(self, obj):
-        self._enqueue(json.dumps(obj))           # str -> WS text frame
+        self._put(self.ctrlq, json.dumps(obj))   # str -> WS text frame
 
-    def _enqueue(self, item):
+    def _put(self, q, item):
         try:
-            self.q.put_nowait(item)
-        except asyncio.QueueFull:
-            try: self.q.get_nowait()
+            q.put_nowait(item)
+        except asyncio.QueueFull:                # drop-oldest (video lag, or a wedged client)
+            try: q.get_nowait()
             except Exception: pass
-            try: self.q.put_nowait(item)
+            try: q.put_nowait(item)
             except Exception: pass
+        self._wake.set()
 
     async def _writer(self):
         try:
             while True:
-                await self.ws.send(await self.q.get())
+                self._wake.clear()               # clear BEFORE draining, so a put during the drain re-wakes us
+                sent = False
+                while not self.ctrlq.empty():    # control first (priority)
+                    await self.ws.send(self.ctrlq.get_nowait()); sent = True
+                while not self.vq.empty():
+                    await self.ws.send(self.vq.get_nowait()); sent = True
+                if not sent:
+                    await self._wake.wait()
         except Exception:
             pass
 
