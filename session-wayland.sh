@@ -24,7 +24,15 @@ trap cleanup EXIT INT TERM
 
 # --- compositor pipeline + QUIC server ---
 rm -f "$SOCK"
-python3 server.py --cert "$CERT" --key "$KEY" --port 4433 ${DESKTOPIA_WS_PLAIN:+--ws-plain} >/tmp/server.log 2>&1 &
+# NRP/appliance (DESKTOPIA_SERVE_PAGE): server.py serves the client page over HTTP on the SAME port as
+# the WebSocket, so the ingress needs only one path '/' and the backend answers its HTTP health probes
+# (a WS-only backend gets probed with a plain GET, never answers, and the ingress parks every upgrade).
+# status.json tells the page to use the websocket transport.
+if [ -n "${DESKTOPIA_SERVE_PAGE:-}" ]; then
+  printf '{"ready":true,"transport":"websocket"}' > client/status.json 2>/dev/null || true
+fi
+python3 server.py --cert "$CERT" --key "$KEY" --port 4433 \
+  ${DESKTOPIA_WS_PLAIN:+--ws-plain} ${DESKTOPIA_SERVE_PAGE:+--serve-dir client} >/tmp/server.log 2>&1 &
 for i in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.25; done
 if [ ! -S "$SOCK" ]; then echo "FAIL: compositor socket never appeared. server.log:"; tail -n 40 /tmp/server.log; exit 1; fi
 echo "compositor + QUIC server up as $(whoami) (socket $SOCK)"
@@ -99,10 +107,4 @@ echo "Now: 'make port' for the public IP:PORT, paste both into client/index.html
 echo "(logs: /tmp/server.log /tmp/slicer.log /tmp/xway.log)"
 echo "=================================================================="
 
-# NRP/appliance: serve the client page + a websocket-transport status.json so a browser can just open
-# the ingress URL (the page connects over WSS through the ingress to server.py's --ws-plain WS port).
-if [ -n "${DESKTOPIA_HTTP_PORT:-}" ]; then
-  printf '{"ready":true,"transport":"websocket"}' > client/status.json 2>/dev/null || true
-  python3 -m http.server "$DESKTOPIA_HTTP_PORT" --directory client >/tmp/httpd.log 2>&1 &
-fi
 wait

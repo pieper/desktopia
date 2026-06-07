@@ -27,11 +27,10 @@ spec:
       command: ["bash","-lc","until [ -f /opt/desktopia/entrypoint-wayland.sh ]; do echo waiting-for-code; sleep 2; done; cd /opt/desktopia; bash entrypoint-wayland.sh; echo STACK-EXITED-staying-up-for-debug; sleep 86400"]
       env:
         - { name: NVIDIA_DRIVER_CAPABILITIES, value: "all" }  # CRITICAL: graphics/display caps for EGL/GL + NVENC
-        - { name: DESKTOPIA_WS_PLAIN,  value: "1" }           # ingress terminates TLS; serve plain ws
-        - { name: DESKTOPIA_HTTP_PORT, value: "8080" }        # pod serves the client page here
+        - { name: DESKTOPIA_WS_PLAIN,   value: "1" }          # ingress terminates TLS; serve plain ws
+        - { name: DESKTOPIA_SERVE_PAGE, value: "1" }          # server.py serves the page on the SAME port as the WS
       ports:
-        - { containerPort: 8080 }                  # client page (index.html + status.json)
-        - { containerPort: 4434 }                  # websocket video/input/control
+        - { containerPort: 4434 }                  # page (index.html/status.json) + websocket video/input/control
       resources:
         limits:   { nvidia.com/gpu: "1", cpu: "8", memory: "16Gi", ephemeral-storage: "24Gi" }
         requests: { nvidia.com/gpu: "1", cpu: "4", memory: "8Gi",  ephemeral-storage: "24Gi" }
@@ -48,8 +47,7 @@ metadata: { name: desktopia, namespace: slicer-dev }
 spec:
   selector: { app: desktopia }
   ports:
-    - { name: page, port: 8080, targetPort: 8080 }
-    - { name: ws,   port: 4434, targetPort: 4434 }
+    - { name: web, port: 4434, targetPort: 4434 }   # one HTTP-answering backend: page + WebSocket
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -61,8 +59,7 @@ spec:
   rules:
     - host: desktopia-slicer-dev.nrp-nautilus.io
       http:
-        paths:
-          - { path: /ws, pathType: Prefix, backend: { service: { name: desktopia, port: { number: 4434 } } } }
-          - { path: /,   pathType: Prefix, backend: { service: { name: desktopia, port: { number: 8080 } } } }
+        paths:   # one path -> one backend that answers both HTTP (page) and the WebSocket upgrade
+          - { path: /, pathType: Prefix, backend: { service: { name: desktopia, port: { number: 4434 } } } }
   tls:
     - hosts: [ desktopia-slicer-dev.nrp-nautilus.io ]   # NRP auto-provisions the Let's Encrypt cert

@@ -8,6 +8,6 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 COPY . /opt/desktopia
 RUN bash /opt/desktopia/deploy/build-image.sh
-ENV DESKTOPIA_WS_PLAIN=1 DESKTOPIA_HTTP_PORT=8080 NVIDIA_DRIVER_CAPABILITIES=all
-EXPOSE 8080 4434
+ENV DESKTOPIA_WS_PLAIN=1 DESKTOPIA_SERVE_PAGE=1 NVIDIA_DRIVER_CAPABILITIES=all
+EXPOSE 4434
 CMD ["bash", "/opt/desktopia/entrypoint-wayland.sh"]

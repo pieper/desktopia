@@ -8,9 +8,11 @@ WT stream byte from the client means "send me a keyframe".
 The compositor pipeline starts immediately (so the Wayland socket exists and Xwayland/Slicer can
 render into it) regardless of viewers; datagrams only go out once a browser connects.
 """
-import argparse, asyncio, json, os, ssl, struct, subprocess
+import argparse, asyncio, concurrent.futures, email.utils, http, json, os, ssl, struct, subprocess
 import gi
 import websockets       # TCP/WSS transport for hosts that only allow HTTP ingress (e.g. NRP)
+from websockets.http11 import Response                    # serve the client page on the same port as the WS
+from websockets.datastructures import Headers             # so the ingress sees one HTTP-answering backend
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 from aioquic.asyncio import serve
@@ -37,6 +39,13 @@ MSG_LEN = {0: 1, 1: 5, 2: 2, 3: 2, 4: 2, 5: 3, 6: 3}
 # syncs automatically; the user pushes/pulls via the control panel. Clipboard lives in the X11
 # CLIPBOARD selection on :2 (where Slicer/apps run), driven by xclip.
 CTRL_MAGIC = 0xC7
+
+# XTEST/Xlib is synchronous and round-trips to the X server, which can stall when the server is busy
+# (e.g. Slicer starting up). NEVER run it on the asyncio event loop -- a stalled Xlib call would freeze
+# video, the HTTP page, and accepting new viewers (observed: a viewer connecting wedged the whole server
+# at inj.reset()). Route every injector call through ONE dedicated thread: off the loop, and serialized
+# because python-xlib is not thread-safe.
+_X_EXEC = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="xinject")
 
 def clipboard_set(text):
     try:
@@ -245,7 +254,7 @@ class StreamProtocol(QuicConnectionProtocol):
         self._inbuf = buf[i:]
 
     def _dispatch(self, m):
-        dispatch_input(m, self.injector, self.broadcaster)
+        self.broadcaster.loop.run_in_executor(_X_EXEC, dispatch_input, m, self.injector, self.broadcaster)
 
     def _parse_control(self):
         while b"\n" in self._ctrlbuf:
@@ -276,7 +285,7 @@ class StreamProtocol(QuicConnectionProtocol):
                 self._session_id = e.stream_id
                 self._h3.send_headers(e.stream_id, [(b":status", b"200")])
                 self.broadcaster.sessions.add(self)
-                self.injector.reset()                     # clear any stuck buttons/modifiers
+                self.broadcaster.loop.run_in_executor(_X_EXEC, self.injector.reset)  # off-loop; clear stuck keys
                 try:                                       # server->client control stream (NDJSON)
                     self._ctrl_out = self._h3.create_webtransport_stream(
                         self._session_id, is_unidirectional=True)
@@ -353,15 +362,54 @@ class WSSession:
             pass
 
 
+_CTYPES = {"html": "text/html; charset=utf-8", "js": "text/javascript", "mjs": "text/javascript",
+           "json": "application/json", "css": "text/css", "svg": "image/svg+xml",
+           "png": "image/png", "ico": "image/x-icon", "wasm": "application/wasm"}
+
+def _http_response(status, body, ctype):
+    """Build a Response the way ServerProtocol.reject() does -- the headers websockets needs to actually
+    flush it. CRUCIAL: 'Connection: close' (a returned Response rejects the WS handshake, after which the
+    server aborts the transport; without close the keep-alive response is discarded and the client gets
+    nothing) plus Date/Content-Length/Content-Type."""
+    return Response(status, http.HTTPStatus(status).phrase, Headers([
+        ("Date", email.utils.formatdate(usegmt=True)),
+        ("Connection", "close"),
+        ("Content-Length", str(len(body))),
+        ("Content-Type", ctype),
+    ]), body)
+
+def make_process_request(serve_dir):
+    """Serve the client page over plain HTTP on the SAME port as the WebSocket. A k8s ingress (NRP's
+    HAProxy) health-probes its backend with a plain GET; a WS-only server never answers, so the ingress
+    marks the backend down and parks every /ws upgrade (symptom: curl to /ws hangs, then 504). With this,
+    the one port answers both HTTP GETs (page + health) and WS upgrades, so a single ingress path '/' works."""
+    root = os.path.realpath(serve_dir)
+    async def process_request(connection, request):
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            return None                                   # let ws_handler take it
+        rel = request.path.split("?", 1)[0].lstrip("/") or "index.html"
+        fp = os.path.realpath(os.path.join(root, rel))
+        if not (fp == root or fp.startswith(root + os.sep)) or not os.path.isfile(fp):
+            return _http_response(404, b"not found\n", "text/plain; charset=utf-8")
+        with open(fp, "rb") as f:
+            body = f.read()
+        ext = fp.rsplit(".", 1)[-1].lower() if "." in os.path.basename(fp) else ""
+        return _http_response(200, body, _CTYPES.get(ext, "application/octet-stream"))
+    return process_request
+
+
 async def ws_handler(ws, *_):                    # *_ tolerates the (ws) or (ws, path) handler signatures
     b, inj = StreamProtocol.broadcaster, StreamProtocol.injector
+    loop = asyncio.get_running_loop()
     sess = WSSession(ws, b, inj)
-    b.sessions.add(sess); inj.reset(); b.force_keyframe()
+    b.sessions.add(sess)
     print("ws viewer connected; sessions:", len(b.sessions), flush=True)
+    loop.run_in_executor(_X_EXEC, inj.reset)     # off-loop: a stalled XTEST must not freeze the server
+    b.force_keyframe()
     try:
         async for msg in ws:
             if isinstance(msg, (bytes, bytearray)):
-                dispatch_input(bytes(msg), inj, b)
+                await loop.run_in_executor(_X_EXEC, dispatch_input, bytes(msg), inj, b)
             else:
                 try: handle_control(json.loads(msg), sess._reply, b)
                 except Exception: pass
@@ -379,6 +427,9 @@ async def main():
     ap.add_argument("--ws-port", type=int, default=4434)
     ap.add_argument("--ws-plain", action="store_true",   # plain ws:// when an ingress provides https/wss (NRP)
                     help="serve WebSocket without TLS (a reverse proxy / k8s ingress terminates TLS)")
+    ap.add_argument("--serve-dir",                        # one port = page + WS (one ingress path '/')
+                    help="also serve this dir's files over HTTP on the WS port, so a single ingress "
+                         "path serves both the page and the WebSocket (backend answers HTTP probes)")
     args = ap.parse_args()
 
     # idle_timeout reaps a frozen/uncleanly-closed viewer (no QUIC ACKs) in ~25s instead of the 60s
@@ -403,9 +454,12 @@ async def main():
     if not args.ws_plain:
         ws_ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ws_ssl.load_cert_chain(args.cert, args.key)
-    await websockets.serve(ws_handler, "0.0.0.0", args.ws_port, ssl=ws_ssl,
-                           max_size=None, compression=None, ping_interval=20, ping_timeout=20)
-    print(f"WebSocket streamer on tcp/{args.ws_port} ({'plain' if args.ws_plain else 'wss'})", flush=True)
+    ws_kwargs = dict(max_size=None, compression=None, ping_interval=20, ping_timeout=20)
+    if args.serve_dir:
+        ws_kwargs["process_request"] = make_process_request(args.serve_dir)
+    await websockets.serve(ws_handler, "0.0.0.0", args.ws_port, ssl=ws_ssl, **ws_kwargs)
+    print(f"WebSocket streamer on tcp/{args.ws_port} ({'plain' if args.ws_plain else 'wss'})"
+          + (f" + page from {args.serve_dir}" if args.serve_dir else ""), flush=True)
     await asyncio.Future()
 
 
