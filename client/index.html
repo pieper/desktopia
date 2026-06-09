@@ -604,5 +604,8 @@ document.getElementById('cad').onclick = () => {
 
 poll();
 </script>
+<!-- 3D-offload overlay: renders Slicer's 3D view locally (client GPU) over the video's 3D-view region.
+     Served by the Slicer scene-export server (:2027); no-ops if that server isn't reachable. -->
+<script src="http://localhost:2027/offload-bundle.js"></script>
 </body>
 </html>

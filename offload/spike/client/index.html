@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Desktopia 3D-offload spike — vtk.js client</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #15151f; color: #d8d8e0;
+               font-family: -apple-system, system-ui, sans-serif; }
+  #bar { position: fixed; top: 0; left: 0; right: 0; height: 34px; display: flex; gap: 10px;
+         align-items: center; padding: 0 10px; background: #1e1e2aee; z-index: 10; font-size: 13px; }
+  #bar input { width: 230px; background: #0d0d14; color: #d8d8e0; border: 1px solid #333; padding: 3px 6px; }
+  #bar button { background: #2a6; color: #fff; border: 0; padding: 4px 10px; cursor: pointer; border-radius: 3px; }
+  #stat { margin-left: auto; opacity: .8; }
+  #view { position: fixed; top: 34px; left: 0; right: 0; bottom: 0; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <span>server</span>
+  <input id="server" value="http://localhost:2027">
+  <button id="load">Load scene</button>
+  <label><input type="checkbox" id="auto"> auto-reload</label>
+  <span>view</span><input id="vidx" value="0" style="width:34px">
+  <span id="stat">idle</span>
+</div>
+<div id="view"></div>
+
+<!-- vtk.js bundled once with esbuild (one shared vtk-core) -> bundle.js. See main.js + build.sh.
+     (vtk.js's UMD global was removed in v36 and generic ESM CDNs break its singletons.) -->
+<script src="bundle.js"></script>
+</body>
+</html>

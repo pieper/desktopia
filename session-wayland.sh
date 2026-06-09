@@ -65,6 +65,7 @@ else
   # --- software path: a plain Xvfb framebuffer (no GPU, no DRM node). Slicer renders with Mesa
   # llvmpipe. Xvfb must come up FIRST so server.py's ximagesrc can capture it. ---
   export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
+  rm -f /tmp/.X2-lock /tmp/.X11-unix/X2 2>/dev/null || true   # clear a stale lock so Xvfb can reclaim :2 on restart
   Xvfb :2 -screen 0 ${SCR_W}x${SCR_H}x24 +extension GLX +render -noreset >/tmp/xvfb.log 2>&1 &
   for i in $(seq 1 80); do [ -e /tmp/.X11-unix/X2 ] && break; sleep 0.25; done
   if [ ! -e /tmp/.X11-unix/X2 ]; then echo "FAIL: Xvfb :2 never appeared. xvfb.log:"; tail -n 40 /tmp/xvfb.log; exit 1; fi
@@ -83,6 +84,32 @@ ulimit -n 65536 2>/dev/null || true
 
 # --- user folders for downloads / data to drag into Slicer (HOME is /home/user) ---
 mkdir -p ~/Data ~/Downloads
+
+# --- 3D-offload (DESKTOPIA_OFFLOAD): a ~/.slicerrc.py that, once Slicer is up, starts the scene-export
+# server (serves the 3D view's VTK scene at :2027 for a browser client to render on the client GPU) and
+# loads a demo volume so there's something to render. Spike path; serializer is vendored beside it. ---
+if [ -n "${DESKTOPIA_OFFLOAD:-}" ]; then
+  cat > ~/.slicerrc.py <<PY
+import sys, qt
+sys.path.insert(0, "$PWD/offload/spike")
+def _offload_start():
+    try:
+        import slicer_scene_export as _e; _e.startSceneExport()
+        print("DESKTOPIA offload: scene-export on :2027")
+    except Exception as ex:
+        print("DESKTOPIA offload: scene-export FAILED:", ex)
+    try:
+        import SampleData
+        v = SampleData.downloadSample("MRHead")
+        vr = slicer.modules.volumerendering.logic()
+        dn = vr.CreateDefaultVolumeRenderingNodes(v); dn.SetVisibility(True)
+        slicer.util.resetThreeDViews()
+        print("DESKTOPIA offload: demo volume (MRHead) loaded + volume rendering on")
+    except Exception as ex:
+        print("DESKTOPIA offload: demo data FAILED:", ex)
+qt.QTimer.singleShot(6000, _offload_start)
+PY
+fi
 
 # --- openbox config: single desktop + no wheel desktop-switching (resources/openbox-rc.xml), so the
 # scroll wheel only ever reaches the app (Slicer) instead of flipping workspaces ---

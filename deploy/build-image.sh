@@ -23,11 +23,14 @@ apt-get install -y --no-install-recommends \
   libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0 libxcb-cursor0 \
   libxcb-util1 libglu1-mesa libodbc2 libpq5 libpulse-mainloop-glib0 libpcre2-16-0 \
   libxcomposite1 libxdamage1 libxtst6 libasound2t64 libcups2t64 libhwloc15 libnspr4 libnss3 \
-  fonts-dejavu-core
+  fonts-dejavu-core \
+  xvfb libgl1-mesa-dri               # software path (no GPU): Xvfb framebuffer + Mesa llvmpipe GL
 pip3 install --break-system-packages "aioquic>=1.0" websockets
 
 # Prebuilt compositor (.so + libwayland 1.25) from the public GHCR artifact (same one the vast path
-# fetches at runtime). Untars to / (into /usr/local/lib/...).
+# fetches at runtime). Untars to / (into /usr/local/lib/...). GPU/wayland path only -- skip for the
+# CPU/software image (DESKTOPIA_SKIP_COMPOSITOR=1), which uses Xvfb + llvmpipe instead.
+if [ -z "${DESKTOPIA_SKIP_COMPOSITOR:-}" ]; then
 REPO=${DESKTOPIA_COMPOSITOR_REPO:-pieper/desktopia}; TAG=${DESKTOPIA_COMPOSITOR_TAG:-compositor}
 TOK=$(curl -fsSL "https://ghcr.io/token?scope=repository:${REPO}:pull" | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 for DIG in $(curl -fsSL -H "Authorization: Bearer $TOK" \
@@ -40,11 +43,15 @@ for l in json.load(sys.stdin).get("layers",[]): print(l["digest"])'); do
 done
 ldconfig
 test -f /usr/local/lib/x86_64-linux-gnu/gstreamer-1.0/libgstwaylanddisplaysrc.so
+fi
 
-# 3D Slicer (release) into /opt
+# 3D Slicer (release) into /opt. Skip (DESKTOPIA_SKIP_SLICER=1) for the local CPU image, where Slicer
+# instead lives in a persistent /opt volume downloaded once at runtime (so code edits don't re-bake it).
+if [ -z "${DESKTOPIA_SKIP_SLICER:-}" ]; then
 mkdir -p /opt
 curl -L --retry 3 "https://download.slicer.org/download?os=linux&stability=release" | tar -xz -C /opt
 ls -d /opt/Slicer-*/
+fi
 
 # Chrome is NOT baked in (kept lean) -- the openbox menu's scripts/chrome-launch.sh installs it on
 # first use. See entrypoint-wayland.sh / session-wayland.sh.

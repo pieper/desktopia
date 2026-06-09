@@ -1,0 +1,16 @@
+# Local CPU/software image for testing under Docker/colima (no GPU). Bakes only the heavy apt deps
+# (+ Xvfb/llvmpipe), so the build is cached once. Slicer and the repo code are NOT baked -- they come
+# from runtime mounts (a persistent /opt volume for Slicer, a bind mount for the code), so editing
+# code or re-downloading Slicer never re-runs the slow image build. See deploy/run-local.sh.
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+COPY deploy/build-image.sh /tmp/build-image.sh
+RUN DESKTOPIA_SKIP_SLICER=1 DESKTOPIA_SKIP_COMPOSITOR=1 bash /tmp/build-image.sh
+
+# Software path: server.py auto-detects xvfb anyway (no /dev/dri), but pin it + serve page+WS on one
+# plain port (4434), and use a modest CPU-friendly geometry/rate.
+ENV DESKTOPIA_WS_PLAIN=1 DESKTOPIA_SERVE_PAGE=1 DESKTOPIA_SOURCE=xvfb \
+    DESKTOPIA_WIDTH=1600 DESKTOPIA_HEIGHT=1000 DESKTOPIA_FPS=20 DESKTOPIA_BITRATE=8000
+EXPOSE 4434
+# entrypoint comes from the bind-mounted repo at /opt/desktopia (see run-local.sh)
+CMD ["bash", "/opt/desktopia/entrypoint-wayland.sh"]

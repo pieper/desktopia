@@ -132,7 +132,9 @@ echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/desktopia-user; chmod 440 /e
 
 # --- stage the scripts where 'user' can read them (avoids /root being root-only) ---
 RUN_DIR=/home/user/desktopia
-mkdir -p "$RUN_DIR"; cp -rf "$PWD/." "$RUN_DIR/" 2>/dev/null || true; chown -R user:user "$RUN_DIR"
+mkdir -p "$RUN_DIR"; cp -rf "$PWD/." "$RUN_DIR/" 2>/dev/null || true
+find "$RUN_DIR" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true  # drop stale bytecode from a prior run
+chown -R user:user "$RUN_DIR"
 
 # --- Chrome is NOT installed by default (keeps the image lean and the CPU/Colab path minimal). The
 # openbox "Google Chrome" menu item runs scripts/chrome-launch.sh, which downloads+installs Chrome on
@@ -178,4 +180,5 @@ exec sudo -u user -H env HOME=/home/user \
   DESKTOPIA_SOURCE="${DESKTOPIA_SOURCE:-}" DESKTOPIA_WIDTH="${DESKTOPIA_WIDTH:-}" \
   DESKTOPIA_HEIGHT="${DESKTOPIA_HEIGHT:-}" DESKTOPIA_FPS="${DESKTOPIA_FPS:-}" \
   DESKTOPIA_BITRATE="${DESKTOPIA_BITRATE:-}" \
+  DESKTOPIA_OFFLOAD="${DESKTOPIA_OFFLOAD:-}" \
   bash "$RUN_DIR/session-wayland.sh"

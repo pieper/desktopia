@@ -1,0 +1,6 @@
+# esbuild output + node deps (regenerate with ./build.sh in a node container)
+node_modules/
+package.json
+package-lock.json
+bundle.js
+offload-bundle.js
