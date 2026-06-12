@@ -139,6 +139,17 @@ class Injector:
             self.key(ks, False)
 
 
+def _enc_props(name):
+    """The property names an encoder element ACTUALLY exposes (varies a lot across nvcodec/x264
+    versions). We use this to add low-latency knobs only when present -- an unknown property passed to
+    Gst.parse_launch fails the WHOLE pipeline, and here that tears down the compositor + desktop."""
+    try:
+        el = Gst.ElementFactory.make(name, None)
+        return {p.name for p in el.list_properties()} if el is not None else set()
+    except Exception:
+        return set()
+
+
 def encoder_bin(fps, bitrate):
     """Prefer hardware NVENC; fall back to software x264. h264parse config-interval=-1 prepends
     SPS/PPS to EVERY keyframe, so a client that connects (or reconnects) mid-stream gets a
@@ -146,9 +157,26 @@ def encoder_bin(fps, bitrate):
     sets except at stream start, and every late joiner silently decodes nothing (consumes frames,
     0 output, no error). A fps-length keyframe interval (~1s) also lets the WebSocket path -- which,
     unlike the datagram path, can't detect a single dropped AU -- self-heal corruption within ~1s.
-    Constrain to H.264 High (browser WebCodecs avc1.640028); byte-stream/AU = Annex-B framing."""
-    enc = (f"nvh264enc name=enc bitrate={bitrate} gop-size={fps}" if Gst.ElementFactory.find("nvh264enc")
-           else f"x264enc name=enc tune=zerolatency speed-preset=veryfast bitrate={bitrate} key-int-max={fps}")
+    Constrain to H.264 High (browser WebCodecs avc1.640028); byte-stream/AU = Annex-B framing.
+
+    LOW LATENCY: NVENC's defaults keep B-frames AND a rate-control lookahead, which hold several
+    frames in the encoder before output -- the single biggest avoidable latency on the GPU path. We
+    force zero B-frames, no lookahead, and a low-delay CBR rate control, but ONLY via knobs the
+    installed nvcodec build exposes (introspected above) so an old/renamed property can't crash the
+    compositor pipeline. x264's tune=zerolatency already implies bframes=0 + no lookahead + sliced VBV."""
+    if Gst.ElementFactory.find("nvh264enc"):
+        p = _enc_props("nvh264enc")
+        parts = [f"nvh264enc name=enc bitrate={bitrate} gop-size={fps}"]
+        if "zerolatency" in p:    parts.append("zerolatency=true")   # nvcodec all-in-one low-delay switch
+        if "bframes" in p:        parts.append("bframes=0")
+        elif "b-frames" in p:     parts.append("b-frames=0")
+        if "rc-lookahead" in p:   parts.append("rc-lookahead=0")
+        if "rc-mode" in p:        parts.append("rc-mode=cbr")        # CBR low-delay; "cbr" nick is standard
+        enc = " ".join(parts)
+    else:
+        # ultrafast (not veryfast): ~half the per-frame encode TIME -> lower latency AND CPU headroom
+        # to run a higher capture rate; the small bitrate-efficiency loss is invisible on a static UI.
+        enc = f"x264enc name=enc tune=zerolatency speed-preset=ultrafast bitrate={bitrate} key-int-max={fps}"
     return (f"{enc} ! video/x-h264,profile=high "
             "! h264parse config-interval=-1 "
             "! video/x-h264,stream-format=byte-stream,alignment=au")
@@ -371,7 +399,9 @@ class WSSession:
         # is drop-oldest (a slow client should lag, not stall). The writer waits on an Event, NOT on the
         # video queue: use-damage pauses video on a static screen, and blocking on video would then stall
         # control replies whenever nothing is rendering.
-        self.vq = asyncio.Queue(maxsize=4)       # whole H.264 AUs; drop-oldest under backpressure
+        self.vq = asyncio.Queue(maxsize=2)       # whole H.264 AUs; drop-oldest under backpressure
+        # (shallow on purpose: a deeper queue just shows the client a STALE backlog -- for an
+        #  interactive stream we want it to skip to the newest frame, not play catch-up)
         self.ctrlq = asyncio.Queue(maxsize=64)   # NDJSON control (tiny, infrequent); effectively lossless
         self._wake = asyncio.Event()
         self.task = asyncio.ensure_future(self._writer())

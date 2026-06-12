@@ -438,7 +438,11 @@ def genericActorSerializer(parent, actor, actorId, context, depth):
     calls = []
     dependencies = []
 
-    if actorVisibility:
+    # Serialize the mapper/property even when INVISIBLE (upstream skips them here). Otherwise a hide drops
+    # the mapper from the dependency tree and a show re-adds it, and the vtk.js synchronizer re-attaching a
+    # dropped mapper is unreliable -> show/hide applies only randomly. Keeping them always present (geometry
+    # is hash-deduped, so no re-download) makes show/hide a reliable visibility toggle.
+    if True:
         mapper = None
         if not hasattr(actor, "GetMapper"):
             logger.debug("This actor does not have a GetMapper method")
@@ -523,7 +527,11 @@ def genericVolumeSerializer(parent, actor, actorId, context, depth):
     calls = []
     dependencies = []
 
-    if actorVisibility:
+    # Serialize the mapper/property even when INVISIBLE (upstream skips them here). Otherwise a hide drops
+    # the mapper from the dependency tree and a show re-adds it, and the vtk.js synchronizer re-attaching a
+    # dropped mapper is unreliable -> show/hide applies only randomly. Keeping them always present (geometry
+    # is hash-deduped, so no re-download) makes show/hide a reliable visibility toggle.
+    if True:
         mapper = None
         if not hasattr(actor, "GetMapper"):
             logger.debug("This actor does not have a GetMapper method")
@@ -631,7 +639,9 @@ def genericMapperSerializer(parent, mapper, mapperId, context, depth):
     dependencies = []
 
     if hasattr(mapper, "GetInputDataObject"):
-        mapper.GetInputAlgorithm().Update()
+        alg = mapper.GetInputAlgorithm()        # may be None (e.g. input set via SetInputData, or no input
+        if alg is not None:                     # connection) -- common on the now-always-serialized actors
+            alg.Update()
         dataObject = mapper.GetInputDataObject(0, 0)
     else:
         logger.debug("This mapper does not have GetInputDataObject method")
@@ -716,7 +726,9 @@ def genericVolumeMapperSerializer(parent, mapper, mapperId, context, depth):
     dependencies = []
 
     if hasattr(mapper, "GetInputDataObject"):
-        mapper.GetInputAlgorithm().Update()
+        alg = mapper.GetInputAlgorithm()        # may be None (e.g. input set via SetInputData, or no input
+        if alg is not None:                     # connection) -- common on the now-always-serialized actors
+            alg.Update()
         dataObject = mapper.GetInputDataObject(0, 0)
     else:
         logger.debug("This mapper does not have GetInputDataObject method")

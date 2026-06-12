@@ -9,3 +9,8 @@ __pycache__/
 client/status.json
 # NOTE: client/ is intentionally NOT ignored — deploy/Dockerfile.nrp bakes it in to serve the page.
 # The root Dockerfile (compositor artifact) copies only from its builder stage, so it's unaffected.
+
+# only needed to build offload-bundle.js (which IS baked); not needed in the image
+offload/spike/client/node_modules
+offload/spike/_shot.png
+deploy/proxytest

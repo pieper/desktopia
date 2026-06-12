@@ -25,7 +25,7 @@ case "$cmd" in
   logs)    exec docker logs -f "$NAME" ;;
   slog)    exec docker exec "$NAME" tail -f /tmp/server.log ;;
   restart) exec docker restart "$NAME" ;;
-  stop)    docker rm -f "$NAME" >/dev/null 2>&1 || true; echo "stopped (Slicer volume $SLICER_DIR kept)"; exit 0 ;;
+  stop)    docker rm -f "$NAME" desktopia-proxy >/dev/null 2>&1 || true; echo "stopped (Slicer volume $SLICER_DIR kept)"; exit 0 ;;
   shell)   exec docker exec -it "$NAME" bash ;;
 esac
 
@@ -45,15 +45,26 @@ echo ">> starting $NAME (Slicer persists in $SLICER_DIR; code bind-mounted from 
 docker run -d --name "$NAME" \
   -p "$PORT:4434" \
   -p 2027:2027 \
+  -p 2028:2028 \
   -e DESKTOPIA_OFFLOAD=1 \
+  -e DESKTOPIA_FPS="${DESKTOPIA_FPS:-60}" \
+  -e DESKTOPIA_BITRATE="${DESKTOPIA_BITRATE:-8000}" \
   --shm-size=2g \
   -v "$SLICER_DIR:/opt" \
   -v "$REPO:/opt/desktopia" \
   "$IMAGE" >/dev/null
 
+# Thin single-port reverse proxy (mirrors the Cloud Run topology: one origin for page + video-WS + offload).
+# Local dev runs it as a sidecar over the container's mapped ports; the Cloud Run image bakes nginx instead.
+PROXY_PORT="${PROXY_PORT:-8080}"
+docker rm -f desktopia-proxy >/dev/null 2>&1 || true
+docker run -d --name desktopia-proxy -p "$PROXY_PORT:80" \
+  -v "$REPO/deploy/proxytest:/etc/nginx/conf.d:ro" nginx:alpine >/dev/null 2>&1 || echo "   (proxy sidecar failed to start)"
+
 cat <<EOF
 >> up. First run downloads Slicer into $SLICER_DIR (~minutes); the desktop/page is live immediately.
-   Open:   http://localhost:$PORT/
+   Open:   http://localhost:$PROXY_PORT/     (single-port proxy; the offload needs this same-origin entry)
+   Direct: http://localhost:$PORT/  + :2027/:2028 still exposed for dev/harness
    Logs:   ./deploy/run-local.sh logs        (container)
            ./deploy/run-local.sh slog        (server.py)
    Shell:  ./deploy/run-local.sh shell

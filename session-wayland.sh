@@ -105,8 +105,74 @@ def _offload_start():
         dn = vr.CreateDefaultVolumeRenderingNodes(v); dn.SetVisibility(True)
         slicer.util.resetThreeDViews()
         print("DESKTOPIA offload: demo volume (MRHead) loaded + volume rendering on")
+        try:                                              # ROI crop, so the offload exercises cropping
+            dn.SetCroppingEnabled(True)
+            roi = dn.GetMarkupsROINode() if hasattr(dn, "GetMarkupsROINode") else None
+            if roi is None and hasattr(dn, "GetROINode"): roi = dn.GetROINode()
+            if roi is None:
+                roi = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsROINode", "CropROI")
+                dn.SetAndObserveROINodeID(roi.GetID())
+            b = [0.0] * 6; v.GetRASBounds(b)
+            roi.SetCenter((b[0] + b[1]) / 2, (b[2] + b[3]) / 2, (b[4] + b[5]) / 2)
+            roi.SetSize((b[1] - b[0]) * 0.7, (b[3] - b[2]) * 0.7, (b[5] - b[4]) * 0.55)
+            print("DESKTOPIA offload: volume cropping ROI enabled")
+        except Exception as ex:
+            print("DESKTOPIA offload: ROI crop FAILED:", ex)
     except Exception as ex:
         print("DESKTOPIA offload: demo data FAILED:", ex)
+    try:
+        import vtk
+        # a surface MODEL (vtkActor + polydata) so the offload exercises models, not just the volume
+        sph = vtk.vtkSphereSource(); sph.SetCenter(0, 0, 40); sph.SetRadius(45)
+        sph.SetThetaResolution(48); sph.SetPhiResolution(48); sph.Update()
+        m = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "OffloadSphere")
+        m.SetAndObservePolyData(sph.GetOutput()); m.CreateDefaultDisplayNodes()
+        m.GetDisplayNode().SetColor(1.0, 0.6, 0.1); m.GetDisplayNode().SetOpacity(0.5)
+        # a SEGMENTATION with a closed-surface segment (its own displayable-manager actors)
+        s2 = vtk.vtkSphereSource(); s2.SetCenter(55, 0, 40); s2.SetRadius(28); s2.Update()
+        seg = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "OffloadSeg")
+        seg.CreateDefaultDisplayNodes()
+        seg.GetSegmentation().SetMasterRepresentationName("Closed surface")
+        seg.AddSegmentFromClosedSurfaceRepresentation(s2.GetOutput(), "blob", [0.2, 0.8, 0.3])
+        print("DESKTOPIA offload: demo model + segmentation added")
+    except Exception as ex:
+        print("DESKTOPIA offload: demo model/seg FAILED:", ex)
+    try:
+        import vtk                                           # markups to exercise the general control-point handles
+        F = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "OffloadPoints")
+        for p in ([60, 40, 70], [-50, 30, 60], [10, -30, 90]): F.AddControlPoint(vtk.vtkVector3d(*p))
+        L = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", "OffloadLine")
+        for p in ([-70, -20, 20], [70, 10, 40]): L.AddControlPoint(vtk.vtkVector3d(*p))
+        Cv = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsCurveNode", "OffloadCurve")
+        for p in ([-50, -60, 100], [0, -80, 100], [50, -60, 100], [50, 20, 100]): Cv.AddControlPoint(vtk.vtkVector3d(*p))
+        print("DESKTOPIA offload: demo markups (points/line/curve) added")
+    except Exception as ex:
+        print("DESKTOPIA offload: demo markups FAILED:", ex)
+    try:
+        import vtk                                           # a transformed model to exercise transforms
+        sph2 = vtk.vtkSphereSource(); sph2.SetRadius(22); sph2.SetThetaResolution(32); sph2.SetPhiResolution(32); sph2.Update()
+        m2 = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "OffloadXformed")
+        m2.SetAndObservePolyData(sph2.GetOutput()); m2.CreateDefaultDisplayNodes(); m2.GetDisplayNode().SetColor(0.2, 0.6, 1.0)
+        T = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "OffloadXform")
+        mat = vtk.vtkMatrix4x4(); mat.SetElement(0, 3, 95); mat.SetElement(1, 3, -75); mat.SetElement(2, 3, 105)
+        T.SetMatrixTransformToParent(mat); m2.SetAndObserveTransformNodeID(T.GetID())
+        print("DESKTOPIA offload: demo transformed model added")
+    except Exception as ex:
+        print("DESKTOPIA offload: demo transform FAILED:", ex)
+    try:
+        import vtk                                           # a scalar-colored model (elevation + rainbow LUT + scalar bar)
+        sph3 = vtk.vtkSphereSource(); sph3.SetRadius(26); sph3.SetCenter(-95, 85, -105)
+        sph3.SetThetaResolution(48); sph3.SetPhiResolution(48); sph3.Update()
+        elev = vtk.vtkElevationFilter(); elev.SetInputConnection(sph3.GetOutputPort())
+        elev.SetLowPoint(0, 59, 0); elev.SetHighPoint(0, 111, 0); elev.SetScalarRange(0.0, 1.0); elev.Update()
+        m3 = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "OffloadScalars")
+        m3.SetAndObservePolyData(elev.GetOutput()); m3.CreateDefaultDisplayNodes()
+        d3 = m3.GetDisplayNode()
+        d3.SetActiveScalarName("Elevation"); d3.SetScalarVisibility(True)
+        d3.SetAndObserveColorNodeID("vtkMRMLColorTableNodeRainbow")
+        print("DESKTOPIA offload: demo scalar-colored model added")
+    except Exception as ex:
+        print("DESKTOPIA offload: demo scalar model FAILED:", ex)
 qt.QTimer.singleShot(6000, _offload_start)
 PY
 fi

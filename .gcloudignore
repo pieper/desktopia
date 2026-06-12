@@ -1,0 +1,12 @@
+.git
+.venv
+.claude
+*.pem
+*.log
+*.pyc
+__pycache__/
+.DS_Store
+client/status.json
+offload/spike/client/node_modules
+offload/spike/_shot.png
+deploy/proxytest

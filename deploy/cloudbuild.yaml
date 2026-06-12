@@ -1,0 +1,11 @@
+# Cloud Build for the Cloud Run image (build in GCP -> no local arch/emulation issues; fast Slicer pull).
+#   gcloud builds submit --config deploy/cloudbuild.yaml \
+#     --substitutions _IMAGE=us-central1-docker.pkg.dev/idc-sandbox-000/desktopia/app:cloudrun .
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-f', 'deploy/Dockerfile.cloudrun', '-t', '${_IMAGE}', '.']
+images: ['${_IMAGE}']
+options:
+  machineType: 'E2_HIGHCPU_8'
+  diskSizeGb: 50
+timeout: '2700s'

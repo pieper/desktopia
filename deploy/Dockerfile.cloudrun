@@ -1,0 +1,31 @@
+# Cloud Run (CPU) image. Bakes 3D Slicer + the desktopia/offload code + an nginx single-port proxy +
+# idc-index into one image, so a STATELESS Cloud Run instance boots straight to a working offload-enabled
+# Slicer with no runtime downloads, no bind mounts, and no GPU. The client renders 3D + slices locally;
+# the server only streams the light Qt UI (software-encoded) and serves the offload scene data.
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+# All runtime deps + 3D Slicer BAKED into /opt (note: NOT SKIP_SLICER); skip the GPU Wayland compositor
+# (the CPU path uses Xvfb + Mesa llvmpipe). This is the slow, cached layer.
+COPY deploy/build-image.sh /tmp/build-image.sh
+RUN DESKTOPIA_SKIP_COMPOSITOR=1 bash /tmp/build-image.sh
+
+# Single-port reverse proxy (nginx) + envsubst, and the IDC loader (bundled now; the {t:load} URL-param
+# handler comes later). idc-index pulls pandas/duckdb/etc. -- heavy but baked once.
+RUN apt-get update && apt-get install -y --no-install-recommends nginx gettext-base \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip3 install --break-system-packages idc-index
+
+# Bake the code (no bind mount on Cloud Run) + stage the proxy template; drop nginx's default site.
+COPY . /opt/desktopia
+RUN cp /opt/desktopia/deploy/proxy.conf.tmpl /etc/nginx/proxy.conf.tmpl \
+ && rm -f /etc/nginx/sites-enabled/default \
+ && chown -R user:user /opt/desktopia
+
+# CPU/software path + offload on. PORT is the single port nginx listens on (Cloud Run injects it; default 8080).
+ENV DESKTOPIA_WS_PLAIN=1 DESKTOPIA_SERVE_PAGE=1 DESKTOPIA_SOURCE=xvfb \
+    DESKTOPIA_WIDTH=1600 DESKTOPIA_HEIGHT=1000 DESKTOPIA_FPS=30 DESKTOPIA_BITRATE=8000 \
+    DESKTOPIA_OFFLOAD=1 PORT=8080
+EXPOSE 8080
+WORKDIR /opt/desktopia
+ENTRYPOINT ["bash", "/opt/desktopia/deploy/entrypoint-cloudrun.sh"]

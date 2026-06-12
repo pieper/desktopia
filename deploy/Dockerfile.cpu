@@ -10,7 +10,7 @@ RUN DESKTOPIA_SKIP_SLICER=1 DESKTOPIA_SKIP_COMPOSITOR=1 bash /tmp/build-image.sh
 # Software path: server.py auto-detects xvfb anyway (no /dev/dri), but pin it + serve page+WS on one
 # plain port (4434), and use a modest CPU-friendly geometry/rate.
 ENV DESKTOPIA_WS_PLAIN=1 DESKTOPIA_SERVE_PAGE=1 DESKTOPIA_SOURCE=xvfb \
-    DESKTOPIA_WIDTH=1600 DESKTOPIA_HEIGHT=1000 DESKTOPIA_FPS=20 DESKTOPIA_BITRATE=8000
+    DESKTOPIA_WIDTH=1600 DESKTOPIA_HEIGHT=1000 DESKTOPIA_FPS=60 DESKTOPIA_BITRATE=8000
 EXPOSE 4434
 # entrypoint comes from the bind-mounted repo at /opt/desktopia (see run-local.sh)
 CMD ["bash", "/opt/desktopia/entrypoint-wayland.sh"]

@@ -134,7 +134,212 @@
 </div>
 <script>
 const HDR = 9; // u32 frame_id, u8 flags, u16 n_chunks, u16 chunk_idx
-const ctx = document.getElementById('v').getContext('2d');
+
+// ---- build stamp: lets us confirm the browser is actually running the latest code (not a cached copy).
+// Visible as a badge bottom-left and on window.__build / the console. Bump on meaningful client changes.
+const BUILD = 'webgl-compositor 2026-06-11h-proxy';
+window.__build = BUILD; console.log('%c[desktopia] index BUILD ' + BUILD, 'color:#6cc6ff;font-weight:bold');
+addEventListener('DOMContentLoaded', () => {
+  const b = document.createElement('div'); b.id = 'buildBadge';
+  b.textContent = 'index:' + BUILD;
+  b.style.cssText = 'position:fixed;left:6px;bottom:6px;z-index:99999;font:10px ui-monospace,monospace;'
+    + 'color:#7fe0a0;background:rgba(0,0,0,.6);padding:2px 6px;border-radius:5px;pointer-events:none';
+  document.body.appendChild(b);
+  window.addEventListener('offload-build', (e) => { b.textContent = 'index:' + BUILD + '  offload:' + e.detail; });
+});
+
+// ---- desktop compositor: ONE WebGL2 canvas. The desktop video is a fullscreen textured quad (not a 2D
+// drawImage), and the local-3D offload layer is composited in a chroma-key fragment shader -- all GPU-side,
+// so there is no per-frame getImageData / JS pixel loop on the main thread (that was starving video decode).
+// Falls back to a 2D canvas if WebGL2 is unavailable. The offload overlay registers its 3D layer via
+// window.desktopCompositor.setLayer({active, source, rect, key, tol}); see offload-overlay.js.
+const desktopCompositor = (() => {
+  const cv = document.getElementById('v');
+  let gl = null;
+  try { gl = cv.getContext('webgl2', { alpha: false, antialias: false, desynchronized: true }); } catch (e) {}
+  if (!gl) {                                                  // 2D fallback (the old path)
+    const c = cv.getContext('2d');
+    return { gl: null, present: (f) => c.drawImage(f, 0, 0, streamW, streamH),
+             resize: (w, h) => { cv.width = w; cv.height = h; }, redraw: () => {},
+             setLayer: () => {}, clearLayer: () => {}, invalidate: () => {}, sampleKeyAt: () => false,
+             setVolume: () => {}, setSliceLayers: () => {}, setSegColors: () => {} };
+  }
+  gl.getExtension('OES_texture_float_linear');                // smooth (LINEAR) sampling of R32F volumes
+  const KEYHOLE = [255, 0, 255], KEYHOLE_TOL = 70;            // server keyhole chroma key (== offload-overlay KEY)
+  const compile = (t, src) => { const s = gl.createShader(t); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.warn('compositor shader:', gl.getShaderInfoLog(s)); return s; };
+  const link = (vs, fs) => { const p = gl.createProgram(); gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(p); return p; };
+  const VS = `#version 300 es
+    in vec2 p; out vec2 uv;
+    void main(){ uv = vec2(p.x*0.5+0.5, 0.5-p.y*0.5); gl_Position = vec4(p,0.,1.); }`;   // uv in image space (y down)
+  const FS_VID = `#version 300 es
+    precision mediump float; in vec2 uv; uniform sampler2D tex; out vec4 o;
+    void main(){ o = vec4(texture(tex, uv).rgb, 1.); }`;
+  const FS_3D = `#version 300 es
+    precision mediump float; in vec2 uv;
+    uniform sampler2D vid, three; uniform vec3 key; uniform float tol; uniform vec4 rect; uniform float flip3d;
+    out vec4 o;
+    void main(){
+      if (uv.x < rect.x || uv.y < rect.y || uv.x > rect.x+rect.z || uv.y > rect.y+rect.w) discard;  // outside 3D rect
+      if (!all(lessThan(abs(texture(vid, uv).rgb - key), vec3(tol)))) discard;   // not keyhole -> keep video (popup in front)
+      vec2 q = (uv - rect.xy) / rect.zw; if (flip3d > 0.5) q.y = 1.0 - q.y;
+      o = vec4(texture(three, q).rgb, 1.);
+    }`;
+  // SLICE pass: reslice a volume (3D texture) on the slice plane, grayscale window/level, keyed to the video.
+  const FS_SLICE = `#version 300 es
+    precision highp float; precision highp sampler3D; in vec2 uv; out vec4 o;
+    uniform sampler2D vid; uniform sampler3D vol;
+    uniform vec3 key; uniform float tol; uniform vec4 rect;
+    uniform mat4 xyToIJK; uniform vec3 dims; uniform vec2 wl; uniform vec2 vpDims;
+    void main(){
+      if (uv.x < rect.x || uv.y < rect.y || uv.x > rect.x+rect.z || uv.y > rect.y+rect.w) discard;   // outside slice rect
+      if (!all(lessThan(abs(texture(vid, uv).rgb - key), vec3(tol)))) discard;     // not keyhole -> keep video (popup in front)
+      vec2 q = (uv - rect.xy) / rect.zw;                          // 0..1 within rect (y down, image space)
+      vec2 sp = vec2(q.x * vpDims.x, (1.0 - q.y) * vpDims.y);     // slice-viewport pixel (Slicer XY is y-up)
+      vec4 ijk = xyToIJK * vec4(sp, 0.0, 1.0);
+      vec3 t = (ijk.xyz + 0.5) / dims;                           // texel-centered normalized volume coords
+      if (any(lessThan(t, vec3(0.0))) || any(greaterThan(t, vec3(1.0)))) { o = vec4(0.,0.,0.,1.); return; }  // off-volume = black
+      float g = clamp((texture(vol, t).r - (wl.y - wl.x*0.5)) / wl.x, 0.0, 1.0);   // window/level
+      o = vec4(g, g, g, 1.0);
+    }`;
+  // SEG overlay pass: reslice a merged labelmap (NEAREST 3D texture), map label value -> segment color, blend over bg.
+  const FS_SEG = `#version 300 es
+    precision highp float; precision highp sampler3D; in vec2 uv; out vec4 o;
+    uniform sampler2D vid; uniform sampler3D lbl; uniform sampler2D segColors;
+    uniform vec3 key; uniform float tol; uniform vec4 rect;
+    uniform mat4 xyToIJK; uniform vec3 dims; uniform vec2 vpDims; uniform float opacity;
+    void main(){
+      if (uv.x < rect.x || uv.y < rect.y || uv.x > rect.x+rect.z || uv.y > rect.y+rect.w) discard;
+      if (!all(lessThan(abs(texture(vid, uv).rgb - key), vec3(tol)))) discard;   // popup in front
+      vec2 q = (uv - rect.xy) / rect.zw; vec2 sp = vec2(q.x*vpDims.x, (1.0-q.y)*vpDims.y);
+      vec3 t = (xyToIJK * vec4(sp, 0.0, 1.0)).xyz; t = (t + 0.5) / dims;
+      if (any(lessThan(t, vec3(0.0))) || any(greaterThan(t, vec3(1.0)))) discard;   // off-labelmap -> keep bg
+      float lv = texture(lbl, t).r;                                   // segment label value
+      if (lv < 0.5) discard;                                          // background -> keep bg
+      o = vec4(texture(segColors, vec2((lv + 0.5)/256.0, 0.5)).rgb, opacity);   // blended over the bg slice
+    }`;
+  const pVid = link(VS, FS_VID), p3D = link(VS, FS_3D), pSlice = link(VS, FS_SLICE), pSeg = link(VS, FS_SEG);
+  const quad = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  const bindQuad = (p) => { const l = gl.getAttribLocation(p, 'p'); gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, 2, gl.FLOAT, false, 0, 0); };
+  const mkTex = () => { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    for (const [k, val] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR],
+      [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, val);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
+    return t; };   // 1x1 placeholder -> texture is "complete"/renderable from creation (no incomplete-texture warnings)
+  const vidTex = mkTex(), threeTex = mkTex(), fbo = gl.createFramebuffer();
+  let layer = null, haveVid = false, have3D = false;
+  const volumes = new Map();          // volumeId -> {tex (TEXTURE_3D R32F), dims}
+  let sliceLayers = [];               // [{active, rect, volumeId, xyToIJK, dims, wl, vpDims}] (each a getter)
+  function setVolume(id, scalars, dims, nearest) {     // nearest=true for labelmaps (must not interpolate labels)
+    let v = volumes.get(id);
+    if (!v) { v = { tex: gl.createTexture(), dims }; volumes.set(id, v); }
+    const f = nearest ? gl.NEAREST : gl.LINEAR;
+    v.dims = dims;
+    gl.bindTexture(gl.TEXTURE_3D, v.tex);
+    for (const [k, val] of [[gl.TEXTURE_MIN_FILTER, f], [gl.TEXTURE_MAG_FILTER, f],
+      [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE]])
+      gl.texParameteri(gl.TEXTURE_3D, k, val);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R32F, dims[0], dims[1], dims[2], 0, gl.RED, gl.FLOAT, scalars);
+  }
+  const segColorTex = new Map();                       // id -> a 256x1 RGBA texture (label value -> segment color)
+  function setSegColors(id, rgba256) {
+    let t = segColorTex.get(id);
+    if (!t) { t = gl.createTexture(); segColorTex.set(id, t);
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      for (const [k, val] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST],
+        [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, val); }
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba256);
+  }
+  function setSliceLayers(list) { sliceLayers = list || []; if (haveVid) draw(); }
+  function resize(w, h) { cv.width = w; cv.height = h; if (haveVid) draw(); }
+  function present(frame) {                                    // new desktop video frame -> upload + composite
+    gl.bindTexture(gl.TEXTURE_2D, vidTex); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame);
+    haveVid = true; draw();
+  }
+  function invalidate() {                                      // 3D re-rendered -> sample vtk's canvas NOW (buffer is
+    const src = layer && layer.active() && layer.source();     // valid right after its render), cache it, recomposite
+    if (src && src.width && src.height) {
+      gl.bindTexture(gl.TEXTURE_2D, threeTex); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src); have3D = true;
+    } else have3D = false;
+    if (haveVid) draw();
+  }
+  function draw() {
+    gl.viewport(0, 0, cv.width, cv.height);
+    gl.useProgram(pVid); bindQuad(pVid);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, vidTex); gl.uniform1i(gl.getUniformLocation(pVid, 'tex'), 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    if (layer && layer.active() && have3D) {                   // composite the cached 3D where the video is keyhole-color
+      const r = layer.rect();
+      gl.useProgram(p3D); bindQuad(p3D);
+      gl.uniform4f(gl.getUniformLocation(p3D, 'rect'), r.sx/streamW, r.sy/streamH, r.sw/streamW, r.sh/streamH);
+      gl.uniform3f(gl.getUniformLocation(p3D, 'key'), layer.key[0]/255, layer.key[1]/255, layer.key[2]/255);
+      gl.uniform1f(gl.getUniformLocation(p3D, 'tol'), layer.tol/255);
+      gl.uniform1f(gl.getUniformLocation(p3D, 'flip3d'), 0.0);   // canvas sources are top-down, like the video (verified)
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, vidTex); gl.uniform1i(gl.getUniformLocation(p3D, 'vid'), 0);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, threeTex); gl.uniform1i(gl.getUniformLocation(p3D, 'three'), 1);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+    for (const s of sliceLayers) {                             // each client-resliced slice view, keyed to the video
+      if (!s.active()) continue;
+      const vol = volumes.get(s.volumeId()); if (!vol) continue;
+      const r = s.rect(); if (!r) continue;
+      gl.useProgram(pSlice); bindQuad(pSlice);
+      gl.uniform4f(gl.getUniformLocation(pSlice, 'rect'), r.sx/streamW, r.sy/streamH, r.sw/streamW, r.sh/streamH);
+      gl.uniform3f(gl.getUniformLocation(pSlice, 'key'), KEYHOLE[0]/255, KEYHOLE[1]/255, KEYHOLE[2]/255);
+      gl.uniform1f(gl.getUniformLocation(pSlice, 'tol'), KEYHOLE_TOL/255);
+      gl.uniformMatrix4fv(gl.getUniformLocation(pSlice, 'xyToIJK'), false, s.xyToIJK());   // column-major
+      gl.uniform3fv(gl.getUniformLocation(pSlice, 'dims'), vol.dims);
+      const wl = s.wl(); gl.uniform2f(gl.getUniformLocation(pSlice, 'wl'), wl[0], wl[1]);
+      const vp = s.vpDims(); gl.uniform2f(gl.getUniformLocation(pSlice, 'vpDims'), vp[0], vp[1]);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, vidTex); gl.uniform1i(gl.getUniformLocation(pSlice, 'vid'), 0);
+      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_3D, vol.tex); gl.uniform1i(gl.getUniformLocation(pSlice, 'vol'), 2);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      const overlays = s.overlays ? s.overlays() : null;          // segmentation (later fg/label) blended over the bg
+      if (overlays && overlays.length) {
+        gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        for (const ov of overlays) {
+          if (ov.kind !== 'seg') continue;
+          const lvol = volumes.get(ov.labelmapId), ct = segColorTex.get(ov.colorTexId);
+          if (!lvol || !ct) continue;
+          gl.useProgram(pSeg); bindQuad(pSeg);
+          gl.uniform4f(gl.getUniformLocation(pSeg, 'rect'), r.sx/streamW, r.sy/streamH, r.sw/streamW, r.sh/streamH);
+          gl.uniform3f(gl.getUniformLocation(pSeg, 'key'), KEYHOLE[0]/255, KEYHOLE[1]/255, KEYHOLE[2]/255);
+          gl.uniform1f(gl.getUniformLocation(pSeg, 'tol'), KEYHOLE_TOL/255);
+          gl.uniformMatrix4fv(gl.getUniformLocation(pSeg, 'xyToIJK'), false, ov.xyToIJK);
+          gl.uniform3fv(gl.getUniformLocation(pSeg, 'dims'), lvol.dims);
+          gl.uniform2f(gl.getUniformLocation(pSeg, 'vpDims'), vp[0], vp[1]);
+          gl.uniform1f(gl.getUniformLocation(pSeg, 'opacity'), ov.opacity);
+          gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, vidTex); gl.uniform1i(gl.getUniformLocation(pSeg, 'vid'), 0);
+          gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_3D, lvol.tex); gl.uniform1i(gl.getUniformLocation(pSeg, 'lbl'), 2);
+          gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, ct); gl.uniform1i(gl.getUniformLocation(pSeg, 'segColors'), 3);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
+        gl.disable(gl.BLEND);
+      }
+    }
+  }
+  function sampleKeyAt(x, y) {                                  // x,y in stream px: read the VIDEO pixel, key test (for routing)
+    if (!layer || !haveVid) return false;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, vidTex, 0);
+    const px = new Uint8Array(4);
+    gl.readPixels(x|0, y|0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);   // FBO-on-texture is top-down: read y directly
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return Math.abs(px[0]-layer.key[0])<layer.tol && Math.abs(px[1]-layer.key[1])<layer.tol && Math.abs(px[2]-layer.key[2])<layer.tol;
+  }
+  return { gl, present, resize, invalidate, sampleKeyAt, setVolume, setSliceLayers, setSegColors,
+    redraw: () => { if (haveVid) draw(); },
+    setLayer: (l) => { layer = l; if (haveVid) draw(); },
+    clearLayer: () => { layer = null; if (haveVid) draw(); } };
+})();
+window.desktopCompositor = desktopCompositor;
+const present = (f) => desktopCompositor.present(f);
 const overlay = document.getElementById('overlay');
 const phaseEl = document.getElementById('phase');
 const subEl = document.getElementById('sub');
@@ -154,7 +359,7 @@ const canvasEl = document.getElementById('v');
 let streamW = canvasEl.width, streamH = canvasEl.height;
 function applyResolution(w, h) {
   if (!w || !h || (w === streamW && h === streamH && canvasEl.width === w)) return;
-  streamW = w; streamH = h; canvasEl.width = w; canvasEl.height = h;   // resizing clears ctx; fine, next draw repaints
+  streamW = w; streamH = h; desktopCompositor.resize(w, h);   // sizes the GL (or 2D fallback) canvas
 }
 let ctrlSend = () => {};     // set when the control stream opens; sends NDJSON {t:...} to the server
 let sendInput = () => {};    // the raw input-channel send (used by the on-screen keyboard / Ctrl-Alt-Del)
@@ -331,7 +536,7 @@ function connectWT(s) {
                    statFrames++; lastFrameAt = performance.now();
                    applyResolution(f.displayWidth || f.codedWidth, f.displayHeight || f.codedHeight);
                    if (!firstFrame) { firstFrame = true; overlay.classList.add('hidden'); connEl.classList.add('ok'); }
-                   ctx.drawImage(f, 0, 0, streamW, streamH); f.close(); },
+                   present(f); f.close(); },
     error: e => { console.warn("decode", e); requestKey(); }
   });
   curDecoder = decoder;
@@ -385,7 +590,7 @@ function connectWT(s) {
     }, 1000);
 
     const partial = new Map();           // frame_id -> {parts:[], have, n, key}
-    let ts = 0, haveKey = false, lastDone = -1;
+    let ts = 0, haveKey = false, lastDone = -1, keyRequested = false;
 
     function onDatagram(buf) {
       statBytes += buf.byteLength;
@@ -405,6 +610,11 @@ function connectWT(s) {
     }
     function decodeFrame(fid, f) {
       partial.delete(fid); lastDone = fid;
+      if (decoder.decodeQueueSize > 3) {                 // behind -> jump to next keyframe, don't grow the queue
+        if (!keyRequested) { keyRequested = true; haveKey = false; needKey(); }
+        return;
+      }
+      keyRequested = false;
       if (!haveKey && !f.key) { needKey(); return; }     // wait for an entry point
       if (f.key) haveKey = true;
       const data = new Uint8Array(f.parts.reduce((a, p) => a + p.length, 0));
@@ -430,13 +640,13 @@ function connectWS(s) {
   if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
   phaseEl.textContent = 'Connecting (WebSocket)…';
   activeTransport = 'websocket'; renderTransport();
-  let firstFrame = false, haveKey = false, ts = 0;
+  let firstFrame = false, haveKey = false, ts = 0, keyRequested = false;
   const decoder = new VideoDecoder({
     output: f => { if (gen !== streamGen) { f.close(); return; }
                    statFrames++; lastFrameAt = performance.now();
                    applyResolution(f.displayWidth || f.codedWidth, f.displayHeight || f.codedHeight);
                    if (!firstFrame) { firstFrame = true; overlay.classList.add('hidden'); connEl.classList.add('ok'); }
-                   ctx.drawImage(f, 0, 0, streamW, streamH); f.close(); },
+                   present(f); f.close(); },
     error: e => { console.warn('decode', e); requestKey(); }
   });
   curDecoder = decoder;
@@ -469,6 +679,14 @@ function connectWS(s) {
     if (typeof ev.data === 'string') { try { onCtrlMsg(JSON.parse(ev.data)); } catch (e) {} return; }
     const u = new Uint8Array(ev.data); statBytes += u.byteLength;
     const isKey = u[0] === 1, au = u.subarray(1);
+    // latency cap: a reliable transport never drops, so if decode/draw falls behind the lag just
+    // accumulates (frames feel "slow" though nothing is lost). When the decode queue backs up, stop
+    // feeding and jump to the next keyframe instead of playing out a stale backlog.
+    if (decoder.decodeQueueSize > 3) {
+      if (!keyRequested) { keyRequested = true; haveKey = false; requestKey(); }
+      return;
+    }
+    keyRequested = false;
     if (!haveKey && !isKey) { requestKey(); return; }            // wait for an entry point
     if (isKey) haveKey = true;
     try { decoder.decode(new EncodedVideoChunk({ type: isKey ? 'key' : 'delta', timestamp: ts, data: au })); } catch (e) {}
@@ -605,7 +823,13 @@ document.getElementById('cad').onclick = () => {
 poll();
 </script>
 <!-- 3D-offload overlay: renders Slicer's 3D view locally (client GPU) over the video's 3D-view region.
-     Served by the Slicer scene-export server (:2027); no-ops if that server isn't reachable. -->
-<script src="http://localhost:2027/offload-bundle.js"></script>
+     Same-origin /offload/ is routed to the Slicer scene-export server (:2027) by the single-port proxy. -->
+<script>
+  // load the offload bundle cache-busted (a stale cross-origin copy could otherwise survive a hard reload)
+  (function(){ var s = document.createElement('script');
+    s.src = '/offload/offload-bundle.js?t=' + Date.now();
+    s.onerror = function(){ console.warn('[desktopia] offload bundle not reachable (/offload)'); };
+    document.body.appendChild(s); })();
+</script>
 </body>
 </html>

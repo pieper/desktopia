@@ -15,7 +15,7 @@ docker run --rm -v "$DIR":/work -w /work node:20-slim sh -c '
     src=${entry%%:*}; out=${entry##*:}
     ./node_modules/.bin/esbuild "$src" --bundle --format=iife --outfile="$out" \
       --define:process.env.NODE_ENV=\"production\" --loader:.glsl=text --loader:.svg=text \
-      --log-level=warning
+      --alias:url=./url-shim.js --alias:events=./events-shim.js --log-level=warning
   done
   echo ">> done:"; ls -la bundle.js offload-bundle.js
 '
