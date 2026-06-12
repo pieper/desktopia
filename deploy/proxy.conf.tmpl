@@ -30,6 +30,8 @@ server {
   # offload HTTP (mrml / blob / bundle) -- strip the /offload/ prefix onto :2027
   location /offload/ {
     proxy_pass http://127.0.0.1:2027/;
+    proxy_http_version 1.1;            # Slicer's WebServerLogic IGNORES HTTP/1.0 (nginx's upstream default) -> hangs;
+    proxy_set_header Connection "";     # force HTTP/1.1 to the upstream (and no stale keepalive Connection header)
     proxy_set_header Host $host;
   }
 

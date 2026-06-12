@@ -46,7 +46,9 @@ docker run -d --name "$NAME" \
   -p "$PORT:4434" \
   -p 2027:2027 \
   -p 2028:2028 \
+  -p 2126:2026 \
   -e DESKTOPIA_OFFLOAD=1 \
+  -e DESKTOPIA_MCP=1 \
   -e DESKTOPIA_FPS="${DESKTOPIA_FPS:-60}" \
   -e DESKTOPIA_BITRATE="${DESKTOPIA_BITRATE:-8000}" \
   --shm-size=2g \

@@ -10,3 +10,6 @@ __pycache__/
 
 # runtime launcher status
 client/status.json
+
+# offload dev/test screenshots (regenerable)
+offload/spike/_*.png

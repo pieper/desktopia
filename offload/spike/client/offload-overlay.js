@@ -32,11 +32,12 @@ import vtkPlane from '@kitware/vtk.js/Common/DataModel/Plane';
 import vtkSphereSource from '@kitware/vtk.js/Filters/Sources/SphereSource';
 import vtkScalarBarActor from '@kitware/vtk.js/Rendering/Core/ScalarBarActor';
 
-const OFFLOAD_BUILD = 'webgl-compositor 2026-06-11h-proxy';
+const OFFLOAD_BUILD = 'transform-widget 2026-06-12g';
 window.__offloadBuild = OFFLOAD_BUILD;
 console.log('%c[offload] BUILD ' + OFFLOAD_BUILD, 'color:#7fe0a0;font-weight:bold');
 try { window.dispatchEvent(new CustomEvent('offload-build', { detail: OFFLOAD_BUILD })); } catch (e) {}
-const SCENE = `${location.origin}/offload`;   // same-origin path (single-port proxy routes /offload/ -> :2027)
+const SCENE = (window.__OFFLOAD_BASE != null) ? window.__OFFLOAD_BASE : `${location.origin}/offload`;   // proxy routes /offload/ -> :2027; the DM-debug harness overrides via window.__OFFLOAD_BASE (same-origin '')
+const STANDALONE = !!window.__OFFLOAD_STANDALONE;   // DM-debug harness: render the vtk.js view full-window, no video / no desktop compositor
 const VIEW = 0;
 const KEY = [255, 0, 255];   // server keyhole chroma key (keep in sync with _KEYHOLE_RGB)
 const KEY_TOL = 70;
@@ -98,7 +99,7 @@ host.addEventListener('pointerdown', () => { interacting = true; }, true);
 window.addEventListener('pointerup', () => { if (interacting) { interacting = false; markDirty(); } }, true);
 host.addEventListener('wheel', () => { markDirty(); }, { passive: true });
 
-let bound = false, lastRect = null;
+let bound = false, lastRect = null, threeDActive = true;   // threeDActive=false when the 3D view isn't in the layout (slice maximized)
 let appliedVersion = null, pendingVersion = null, syncing = false;
 let ws = null, wsOpen = false, lastPong = 0, hbTimer = null;
 function connected() { return wsOpen && (Date.now() - lastPong < 6000); }
@@ -310,9 +311,9 @@ function drawSliceMarkups(m) {
     for (const node of mirror.values()) {
       if (!isSliceMarkup(node)) continue;
       const disp = displayNodeOf(node); if (disp && disp.attrs.visibility === 0) continue;
-      const color = (disp && disp.attrs.color) || [1, 1, 0];
+      const color = (disp && (disp.attrs.selectedColor || disp.attrs.color)) || [1, 1, 0];   // MRML SelectedColor
       const cps = node.attrs.controlPoints || [];
-      const line = (node.attrs.linePoints || cps).map(pj.project);          // spline for curves, else control pts
+      const line = ((node.id !== leasedId && node.attrs.linePoints) || cps).map(pj.project);   // while dragging THIS markup follow local control points (server spline lags); else the spline
       if (node.attrs.connect && line.length > 1) {                          // connecting line where it nears the plane
         vctx.strokeStyle = rgbaStr(color, 0.9); vctx.lineWidth = 2; vctx.beginPath();
         const seg = (a, b) => { if (Math.min(Math.abs(a.dist), Math.abs(b.dist)) < 25 || Math.sign(a.dist) !== Math.sign(b.dist)) { vctx.moveTo(a.x, a.y); vctx.lineTo(b.x, b.y); } };
@@ -441,7 +442,12 @@ async function syncSlices() {
       xyToIJK: transpose4(mul4(inv4(so.ijkToRAS), n.attrs.xyToRAS)),
     }));
     layers.push({
-      active: () => !!sliceViewports[layoutName],
+      active: () => {                                   // CLINICAL SAFETY: render ONLY when the screen rect's
+        const r = sliceViewports[layoutName];           // aspect matches the slice-node dims. During a resize
+        if (!r || !r.w || !r.h) return false;           // the two can momentarily disagree -> blank (keyhole)
+        const ar = r.w / r.h, avp = vp[0] / vp[1];       // rather than show a distorted (wrong-aspect) image,
+        return Math.abs(ar - avp) <= 0.03 * avp;         // which would be clinically misleading.
+      },
       rect: () => { const r = sliceViewports[layoutName]; return r ? { sx: r.x, sy: r.y, sw: r.w, sh: r.h } : null; },
       volumeId: () => vol.id, xyToIJK: () => xyToIJK, dims: vol.attrs.dims,
       wl: () => [win, lev], vpDims: () => vp, overlays: () => overlays,
@@ -472,7 +478,9 @@ function mkHandle(meta, id) {
   const act = vtkActor.newInstance(); act.setMapper(m);
   const base = meta.type === 'center' ? [0.4, 1, 0.5]            // ROI center: green (translate)
     : meta.type === 'point' ? [1, 0.5, 0.1]                      // markup control point: orange
-      : [0.35, 0.8, 1];                                          // ROI resize: blue
+      : meta.type === 'taxis' ? [[1, 0.3, 0.3], [0.3, 1, 0.3], [0.4, 0.5, 1]][meta.axis]   // transform X/Y/Z arrow
+        : meta.type === 'tcenter' ? [0.9, 0.9, 0.9]              // transform widget center (free translate)
+          : [0.35, 0.8, 1];                                      // ROI resize: blue
   act.getProperty().setColor(...base);
   renderer.addActor(act);
   return { ...meta, src, actor: act, baseColor: base, nodeId: id, world: [0, 0, 0] };
@@ -726,6 +734,27 @@ function polyline(pts, closed) {
   return pd;
 }
 
+// Glyph radius (world units) following Slicer's markups display logic, NOT an image-level fudge:
+//   - useGlyphScale == false -> GlyphSize is an absolute diameter in mm (MRML GlyphSize).
+//   - useGlyphScale == true  -> GlyphScale is a PERCENT of the viewport height (Slicer's glyphs are
+//     screen-relative), so convert that screen-percentage to world units at the focal depth via the camera.
+// (Recomputed on each sync; for screen-CONSTANT size during a local zoom we'd also refresh on camera change.)
+function glyphRadius(disp) {
+  const a = (disp && disp.attrs) || {};
+  if (a.useGlyphScale === false && a.glyphSize) return a.glyphSize / 2;
+  const s = (a.glyphScale != null ? a.glyphScale : 3.0);
+  const cam = renderer.getActiveCamera();
+  let worldH;
+  if (cam.getParallelProjection()) {
+    worldH = 2 * cam.getParallelScale();
+  } else {
+    const p = cam.getPosition(), f = cam.getFocalPoint();
+    const dist = Math.hypot(p[0] - f[0], p[1] - f[1], p[2] - f[2]);
+    worldH = 2 * dist * Math.tan((cam.getViewAngle() * Math.PI / 180) / 2);
+  }
+  return Math.max(0.2, (s / 100) * worldH / 2);   // GlyphScale% of the viewport height -> world radius
+}
+
 // MarkupsDM: the GENERAL markup widget -- N control-point handles (draggable, write {mcp}) + optional
 // connecting line (curves use the server's interpolated linePoints; line/angle use the control points).
 class MarkupsDM {
@@ -733,7 +762,8 @@ class MarkupsDM {
   handles(node) { return node.class.includes('Markups') && !node.class.includes('Display') && !node.class.includes('ROINode'); }
   async update(id, node) {
     const a = node.attrs, cps = a.controlPoints || [];
-    const disp = displayNodeOf(node), vis = visibleOf(disp), color = (disp && disp.attrs.color) || [1, 0.5, 0.1];
+    const disp = displayNodeOf(node), vis = visibleOf(disp);
+    const color = (disp && (disp.attrs.selectedColor || disp.attrs.color)) || [1, 0.5, 0.1];   // MRML SelectedColor (control points default to selected)
     let it = this.items.get(id);
     if (!it) { it = { lineActor: null, lineMapper: null, handles: [] }; this.items.set(id, it); }
     if (a.connect && cps.length >= 2) {                    // connecting line/curve
@@ -750,9 +780,12 @@ class MarkupsDM {
     } else if (it.lineActor) { renderer.removeActor(it.lineActor); it.lineActor = null; }
     while (it.handles.length < cps.length) it.handles.push(mkHandle({ type: 'point', index: it.handles.length }, id));
     while (it.handles.length > cps.length) renderer.removeActor(it.handles.pop().actor);
+    const gr = glyphRadius(disp), sel = a.selectedFlags, unsel = (disp && disp.attrs.color) || color;
     for (let i = 0; i < cps.length; i++) {
       const h = it.handles[i]; h.index = i; h.world = cps[i].slice();
-      h.src.setRadius(3.5); h.actor.setPosition(cps[i][0], cps[i][1], cps[i][2]); h.actor.setVisibility(vis);
+      const pc = (sel && sel[i] === false) ? unsel : color;   // per-point: SelectedColor when selected, Color when not
+      h.baseColor = pc; h.actor.getProperty().setColor(...pc);
+      h.src.setRadius(gr); h.actor.setPosition(cps[i][0], cps[i][1], cps[i][2]); h.actor.setVisibility(vis);
     }
     refreshHandles();
   }
@@ -763,7 +796,64 @@ class MarkupsDM {
   }
 }
 
-const DMS = [new ViewDM(), new ModelDM(), new VolumeRenderingDM(), new SegmentationDM(), new ROIDM(), new MarkupsDM(), new OrientationMarkerDM()];
+// TransformWidgetDM: the LINEAR transform interaction widget -- 3 axis-translate handles (X/Y/Z) + a center
+// free-translate handle at the transform's origin, oriented by its axes; drag edits the matrix translation and
+// writes {t:transform}. (Non-linear transform editing is deferred to WebGPU/vtk-wasm -- see TODO.)
+class TransformWidgetDM {
+  constructor() { this.items = new Map(); }
+  handles(node) {
+    if (!node.class.includes('TransformNode') || !node.attrs.linear) return false;
+    const disp = displayNodeOf(node);
+    return !!(node.attrs.matrixToParent && node.attrs.widgetCenter && node.attrs.axes && disp && disp.attrs.editorVisibility);
+  }
+  async update(id, node) {
+    if (!this.handles(node)) { if (this.items.get(id)) this.remove(id); return; }
+    const a = node.attrs, disp = displayNodeOf(node), C = a.widgetCenter, ax = a.axes;
+    let it = this.items.get(id);
+    if (!it) {
+      const lineMapper = vtkMapper.newInstance(), lineActor = vtkActor.newInstance(); lineActor.setMapper(lineMapper);
+      const lp = lineActor.getProperty(); lp.setColor(0.85, 0.85, 0.85); lp.setLineWidth(2); lp.setLighting(false);
+      renderer.addActor(lineActor);
+      const hs = [];
+      for (let axis = 0; axis < 3; axis++) hs.push(mkHandle({ type: 'taxis', axis }, id));
+      hs.push(mkHandle({ type: 'tcenter' }, id));
+      it = { lineActor, lineMapper, handles: hs }; this.items.set(id, it);
+    }
+    const len = Math.max(8, glyphRadius(disp) * 6), r = Math.max(1.5, len * 0.12);   // screen-relative arrow length
+    const flat = [], lines = [];
+    for (let axis = 0; axis < 3; axis++) {
+      const u = ax[axis], end = [C[0] + u[0] * len, C[1] + u[1] * len, C[2] + u[2] * len];
+      const h = it.handles[axis]; h.world = end; h.src.setRadius(r); h.actor.setPosition(...end);
+      flat.push(C[0], C[1], C[2], end[0], end[1], end[2]); lines.push(2, axis * 2, axis * 2 + 1);
+    }
+    const ch = it.handles[3]; ch.world = C.slice(); ch.src.setRadius(r * 1.2); ch.actor.setPosition(...C);
+    const pd = vtkPolyData.newInstance(); pd.getPoints().setData(Float32Array.from(flat), 3); pd.getLines().setData(Uint32Array.from(lines));
+    it.lineMapper.setInputData(pd);
+    refreshHandles();
+  }
+  remove(id) {
+    const it = this.items.get(id);
+    if (it) { renderer.removeActor(it.lineActor); for (const h of it.handles) renderer.removeActor(h.actor); this.items.delete(id); }
+    refreshHandles();
+  }
+}
+
+const DMS = [new ViewDM(), new ModelDM(), new VolumeRenderingDM(), new SegmentationDM(), new ROIDM(), new MarkupsDM(), new TransformWidgetDM(), new OrientationMarkerDM()];
+
+// 3D introspection hook for the DM-debug harness: actor/volume counts, per-DM item counts, camera, bounds.
+window.__dmDbg = () => {
+  let acts = 0, vols = 0;
+  try { acts = renderer.getActors().length; vols = renderer.getVolumes().length; } catch (e) {}
+  const cam = renderer.getActiveCamera();
+  return JSON.stringify({
+    build: OFFLOAD_BUILD, standalone: STANDALONE, connected: connected(),
+    mirror: mirror.size, actors: acts, volumes: vols,
+    dms: DMS.map((d) => ({ name: d.constructor.name, items: d.items ? d.items.size : (d.widget ? 1 : 0) })),
+    handles: pickableHandles.length,
+    camera: { pos: cam.getPosition().map((x) => Math.round(x)), focal: cam.getFocalPoint().map((x) => Math.round(x)) },
+    bounds: (renderer.computeVisiblePropBounds() || []).map((x) => Math.round(x)),
+  });
+};
 
 // Deterministic full re-apply: run each DM over the current mirror, then drop any vtk objects whose node
 // left the closure. No fragile incremental diffing -- the scene is rebuilt from MRML state every change.
@@ -886,6 +976,12 @@ host.addEventListener('pointerdown', (e) => {
     drag.startPoint = a.controlPoints[h.index].slice();
     cameraPlane(drag.startPoint);
     leasedLocal = { controlPoints: a.controlPoints.map((p) => p.slice()) };
+  } else if (h.type === 'taxis' || h.type === 'tcenter') {  // transform interaction widget handle
+    const C = a.widgetCenter, ax = a.axes;
+    drag.startCenter = C.slice();
+    if (h.type === 'taxis') { const u = ax[h.axis]; drag.axisVec = u; drag.screenOut = screenDir(C, u); }
+    else cameraPlane(C);                                    // center: free translate in the camera plane
+    leasedLocal = { widgetCenter: C.slice(), matrixToParent: a.matrixToParent.slice() };
   } else {                                                  // ROI handle
     const C = a.center, ax = a.axes;
     drag.startCenter = C.slice(); drag.startHalf = a.halfSizes.slice();
@@ -903,7 +999,10 @@ host.addEventListener('pointerdown', (e) => {
 function setHoveredHandle(h) {
   if (h === hoveredHandle) return;
   if (hoveredHandle) hoveredHandle.actor.getProperty().setColor(...hoveredHandle.baseColor);
-  if (h) h.actor.getProperty().setColor(...HANDLE_HOVER);
+  if (h) {                                          // hover = the node's MRML ActiveColor (markups: green), else default
+    const node = mirror.get(h.nodeId), disp = node && displayNodeOf(node);
+    h.actor.getProperty().setColor(...((disp && disp.attrs.activeColor) || HANDLE_HOVER));
+  }
   hoveredHandle = h;
 }
 host.addEventListener('pointermove', (e) => {
@@ -927,8 +1026,27 @@ function onHandleMove(e) {
     const np = [P0[0] + R[0] * ca + U[0] * cb, P0[1] + R[1] * ca + U[1] * cb, P0[2] + R[2] * ca + U[2] * cb];
     a.controlPoints = a.controlPoints.map((p, i) => (i === h.index ? np : p));
     leasedLocal = { controlPoints: a.controlPoints.map((p) => p.slice()) };
-    syncDMs();
+    drawVectorOverlay();              // SYNC slice-glyph update with the NEW position -- the async syncDMs's own
+    syncDMs();                        // redraw lands a frame or two later (that delay WAS the slice-view drag lag)
     sendGated({ t: 'mcp', id: leasedId, index: h.index, pos: np });
+    return;
+  }
+  if (h.type === 'taxis' || h.type === 'tcenter') {                       // transform widget -> edit the matrix translation
+    const C0 = dragging.startCenter;
+    let np;
+    if (h.type === 'tcenter') {
+      const [ca, cb] = cameraSolve(dx, dy, dragging), R = dragging.right, U = dragging.up;
+      np = [C0[0] + R[0] * ca + U[0] * cb, C0[1] + R[1] * ca + U[1] * cb, C0[2] + R[2] * ca + U[2] * cb];
+    } else {
+      const u = dragging.axisVec, d = projOnto(dx, dy, dragging.screenOut);   // world units along the screen-projected axis
+      np = [C0[0] + u[0] * d, C0[1] + u[1] * d, C0[2] + u[2] * d];
+    }
+    a.widgetCenter = np;
+    const M = a.matrixToParent.slice(); M[3] = np[0]; M[7] = np[1]; M[11] = np[2];   // row-major translation column
+    a.matrixToParent = M;
+    leasedLocal = { widgetCenter: np.slice(), matrixToParent: M.slice() };
+    syncDMs();                                                            // re-render the widget + the transformed content
+    sendGated({ t: 'transform', id: leasedId, matrix: M });
     return;
   }
   const ax = a.axes;
@@ -994,6 +1112,16 @@ function videoMap() {
 }
 
 function positionOverlay() {
+  if (STANDALONE) {                                            // harness: host IS the visible output, full window, no video
+    const cw = window.innerWidth, ch = window.innerHeight;
+    for (const el of [host, out]) { el.style.left = '0px'; el.style.top = '0px'; el.style.width = cw + 'px'; el.style.height = ch + 'px'; el.style.display = 'block'; }
+    host.style.opacity = '1';
+    if (out.width !== cw || out.height !== ch) { out.width = cw; out.height = ch; }
+    if (maskCv.width !== cw || maskCv.height !== ch) { maskCv.width = cw; maskCv.height = ch; }
+    geom = { sx: 0, sy: 0, sw: cw, sh: ch, cw, ch };
+    glWindow.setSize(cw, ch); renderWindow.render(); markDirty();
+    return;
+  }
   if (!lastRect) return;
   const m = videoMap();
   if (!m) return;
@@ -1018,16 +1146,23 @@ function composite(now) {
     return;
   }
   if (!geom || out.style.display === 'none') return;
-  const v = document.getElementById('v');
   const gl = glWindow.getCanvas && glWindow.getCanvas();
-  if (!v || !gl) return;
+  if (!gl) return;
+  if (STANDALONE) {                                            // no video: host (opacity 1) shows the render; just draw decorations
+    if (scene3DDirty || interacting) { renderWindow.render(); pushCameraIfChanged(); scene3DDirty = false; }
+    outCtx.clearRect(0, 0, geom.cw, geom.ch); drawDecorations2D();
+    return;
+  }
+  const v = document.getElementById('v');
+  if (!v) return;
   const { sx, sy, sw, sh, cw, ch } = geom;
 
   // Render the local 3D only when it changed, then hand it to the GPU desktop compositor (index.html), which
   // composites video + 3D in a chroma-key shader. No JS pixel loop / canvas blit here anymore.
   if (scene3DDirty || interacting) {
-    renderWindow.render(); pushCameraIfChanged(); scene3DDirty = false;
-    if (window.desktopCompositor) window.desktopCompositor.invalidate();
+    if (scene3DDirty) renderer.resetCameraClippingRange();   // bounds may have changed (async-loaded volume/models) ->
+    renderWindow.render(); pushCameraIfChanged(); scene3DDirty = false;   // keep content in the camera's clip range so it
+    if (window.desktopCompositor) window.desktopCompositor.invalidate();  // shows WITHOUT needing a first interaction (race fix)
   }
 
   // routing mask (bare-3D vs popup over the 3D rect) -- NOW only used for event routing, at ~10 Hz, so the
@@ -1065,6 +1200,36 @@ function drawDecorations2D() {
   }
   drawRuler();
   outCtx.restore();
+  drawMarkupLabels3D();
+}
+
+// Markup text in the 3D view (vtk.js has no 3D text actor -> draw on the 2D decoration canvas via worldToScreen,
+// like the axis labels). pointLabelsVisibility -> per-control-point name; propertiesLabelVisibility -> one
+// name+measurements label. Color = MRML SelectedColor, size from textScale -- both read from the display node.
+function drawMarkupLabels3D() {
+  for (const node of mirror.values()) {
+    if (!node.class.includes('Markups') || node.class.includes('Display') || node.class.includes('ROINode')) continue;
+    const disp = displayNodeOf(node); if (!disp || !visibleOf(disp)) continue;
+    const a = node.attrs, da = disp.attrs, cps = a.controlPoints || [];
+    if (!cps.length || (!da.pointLabelsVisibility && !da.propertiesLabelVisibility)) continue;
+    const color = da.selectedColor || da.color || [1, 0.5, 0.5];
+    const px = Math.max(9, Math.round((da.textScale || 3) * 4));
+    outCtx.save();
+    outCtx.font = `${px}px sans-serif`; outCtx.fillStyle = rgbaStr(color, 1);
+    outCtx.strokeStyle = 'black'; outCtx.lineWidth = 3; outCtx.lineJoin = 'round';
+    outCtx.textBaseline = 'middle'; outCtx.textAlign = 'left';
+    const label = (t, sx, sy) => { if (t) { outCtx.strokeText(t, sx, sy); outCtx.fillText(t, sx, sy); } };
+    if (da.pointLabelsVisibility && a.pointLabels) {
+      for (let i = 0; i < cps.length; i++) { const s = worldToScreen(cps[i]); label(a.pointLabels[i] || '', s.x + 7, s.y); }
+    }
+    if (da.propertiesLabelVisibility) {
+      const s = worldToScreen(cps[0]);
+      let txt = node.name;
+      for (const mm of (a.measurements || [])) if (mm.value) txt += '  ' + mm.value;
+      label(txt, s.x + 7, s.y - 12);
+    }
+    outCtx.restore();
+  }
 }
 function drawRuler() {
   const cam = renderer.getActiveCamera(), F = cam.getFocalPoint();
@@ -1086,6 +1251,7 @@ function drawRuler() {
 
 function routePointer(e) {
   if (e.buttons) return;
+  if (STANDALONE) { host.style.pointerEvents = 'auto'; return; }   // no video region; host owns all input
   if (!geom || out.style.display === 'none' || !connected()) { host.style.pointerEvents = 'auto'; return; }
   const r = out.getBoundingClientRect();
   let local = true;
@@ -1114,9 +1280,23 @@ function pushCameraIfChanged() {
   if (sig !== lastCamSig) { lastCamSig = sig; postCamera(); }
 }
 
+// On WS disconnect (e.g. the server restarting) drop ALL stale rendering so no leftover slice lines /
+// markups / 3D actors linger frozen on screen until the fresh reconnect repulls the scene.
+function clearClientRendering() {
+  sliceViewports = {};
+  if (window.desktopCompositor) { window.desktopCompositor.setSliceLayers([]); window.desktopCompositor.redraw(); }
+  if (typeof vctx !== 'undefined' && vec2d) { vec2d.width = vec2d.width; }   // clear the 2D vector overlay (markup lines/brush)
+  for (const dm of DMS) if (dm.items) for (const id of [...dm.items.keys()]) dm.remove(id);
+  if (viewBoxActor) viewBoxActor.setVisibility(false);
+  mirror.clear();
+  cameraInit = false;               // re-apply the server camera once the fresh scene arrives
+  scene3DDirty = true;
+}
+
 function connectWS() {
   const wsproto = location.protocol === 'https:' ? 'wss:' : 'ws:';   // same-origin (proxy /offload-ws -> :2028)
-  try { ws = new WebSocket(`${wsproto}//${location.host}/offload-ws`); } catch (e) { return; }
+  const wsurl = window.__OFFLOAD_WS || `${wsproto}//${location.host}/offload-ws`;   // harness overrides (direct :2028/:2031)
+  try { ws = new WebSocket(wsurl); } catch (e) { return; }
   ws.onopen = () => {
     wsOpen = true; lastPong = Date.now(); appliedVersion = null;   // force a fresh pull (server may have restarted)
     console.log('[offload] ws connected (MRML sync)');
@@ -1124,15 +1304,23 @@ function connectWS() {
     clearInterval(hbTimer);
     hbTimer = setInterval(() => { try { ws.send(JSON.stringify({ t: 'ping' })); } catch (e) {} }, 1000);
   };
-  ws.onclose = () => { wsOpen = false; clearInterval(hbTimer); setTimeout(connectWS, 1000); };
+  ws.onclose = () => { wsOpen = false; clearInterval(hbTimer); clearClientRendering(); setTimeout(connectWS, 1000); };
   ws.onerror = () => {};
   ws.onmessage = (ev) => {
     let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
     lastPong = Date.now();
     if (m.t === 'ack') { onAck(); return; }             // gate the next write -> rate adapts to RTT
     if (m.t === 'state' || m.t === 'pong') {            // both carry version+viewport (pong = 1s reconcile)
-      if (m.viewport) { lastRect = m.viewport; positionOverlay(); }
-      if (m.sliceViewports) { sliceViewports = m.sliceViewports; if (window.desktopCompositor) window.desktopCompositor.redraw(); drawVectorOverlay(); }
+      if (m.viewport) { threeDActive = true; lastRect = m.viewport; positionOverlay(); }
+      else if (m.viewport === null) {   // 3D view left the layout (slice maximized) -> hide the 3D overlay + decorations
+        threeDActive = false; host.style.display = 'none'; out.style.display = 'none';
+        if (window.desktopCompositor) window.desktopCompositor.redraw();
+      }
+      // ATOMIC slice geometry: patch the mirror slice NODES (dims/xyToRAS) AND their screen rects TOGETHER,
+      // then rebuild -- so the reslice never pairs a new rect with stale node dims (wrong-aspect-on-resize).
+      if (m.sliceNodes) { for (const id in m.sliceNodes) mirror.set(id, m.sliceNodes[id]); }
+      if (m.sliceViewports) sliceViewports = m.sliceViewports;
+      if (m.sliceNodes || m.sliceViewports) { syncSlices(); drawVectorOverlay(); }
       if (m.segEdit !== undefined) { segEdit = m.segEdit; drawVectorOverlay(); }
       if (m.version !== undefined) { pendingVersion = m.version; syncToLatest(); }
     }
@@ -1144,9 +1332,10 @@ function connectWS() {
   if (!bound) { interactor.bindEvents(host); bound = true; }
   appliedVersion = pendingVersion = 0;
   connectWS();
+  if (STANDALONE) positionOverlay();     // size + show the full-window vtk.js view now (no server viewport rect needed)
   window.addEventListener('resize', positionOverlay);
   if (window.desktopCompositor) window.desktopCompositor.setLayer({   // GPU desktop compositor composites our 3D
-    active: () => connected() && !!geom,
+    active: () => connected() && !!geom && threeDActive,
     source: () => (glWindow.getCanvas && glWindow.getCanvas()),       // vtk's WebGL canvas, sampled as a texture
     rect: () => geom,                                                 // {sx,sy,sw,sh} in stream px
     key: KEY, tol: KEY_TOL,

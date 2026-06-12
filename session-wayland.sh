@@ -90,11 +90,12 @@ mkdir -p ~/Data ~/Downloads
 # loads a demo volume so there's something to render. Spike path; serializer is vendored beside it. ---
 if [ -n "${DESKTOPIA_OFFLOAD:-}" ]; then
   cat > ~/.slicerrc.py <<PY
-import sys, qt
+import sys, qt, os
 sys.path.insert(0, "$PWD/offload/spike")
 def _offload_start():
     try:
-        import slicer_scene_export as _e; _e.startSceneExport()
+        import slicer_scene_export as _e
+        _e.startSceneExport(enable_mcp=bool(os.environ.get("DESKTOPIA_MCP")))   # dev: MCP co-mounted at :2027/mcp
         print("DESKTOPIA offload: scene-export on :2027")
     except Exception as ex:
         print("DESKTOPIA offload: scene-export FAILED:", ex)
@@ -156,6 +157,7 @@ def _offload_start():
         T = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "OffloadXform")
         mat = vtk.vtkMatrix4x4(); mat.SetElement(0, 3, 95); mat.SetElement(1, 3, -75); mat.SetElement(2, 3, 105)
         T.SetMatrixTransformToParent(mat); m2.SetAndObserveTransformNodeID(T.GetID())
+        T.CreateDefaultDisplayNodes(); T.GetDisplayNode().SetEditorVisibility(True)   # show the interaction widget (client renders it)
         print("DESKTOPIA offload: demo transformed model added")
     except Exception as ex:
         print("DESKTOPIA offload: demo transform FAILED:", ex)

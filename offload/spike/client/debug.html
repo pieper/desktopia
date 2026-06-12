@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>offload DM debug harness</title>
+<!--
+  Standalone DM-debug harness for the local-Slicer-as-both loop. Served by slicer_scene_export.py
+  (run with startSceneExport(port=2030, ws_port=2031, enable_keyhole=False) in a LOCAL Qt6 Slicer).
+  No video / no desktop compositor: offload-overlay.js renders the MRML closure's displayable managers
+  full-window into its own vtk.js canvas, so both the server (Python/MCP) and client (JS via
+  qSlicerWebWidget.evalJS) are fully introspectable. Production over-video path is unaffected (the
+  __OFFLOAD_* globals below are only set here).
+-->
+<style>html, body { margin: 0; height: 100%; background: #0b0b12; overflow: hidden; }</style>
+</head>
+<body>
+<script>
+  window.__OFFLOAD_STANDALONE = true;     // full-window vtk.js view, no video/compositor
+  window.__OFFLOAD_BASE = '';             // same-origin: /mrml, /blob served by THIS scene-export server
+  // control WebSocket: same host, the scene-export ws_port (default harness 2031). ?ws=NNNN overrides.
+  (function () {
+    var p = new URLSearchParams(location.search);
+    var wsport = p.get('ws') || '2031';
+    window.__OFFLOAD_WS = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.hostname + ':' + wsport;
+  })();
+</script>
+<script src="offload-bundle.js"></script>
+</body>
+</html>

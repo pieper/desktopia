@@ -206,6 +206,18 @@ def serialize_node(node):
         a["ambient"] = node.GetAmbient(); a["diffuse"] = node.GetDiffuse(); a["specular"] = node.GetSpecular()
         a["edgeVisibility"] = node.GetEdgeVisibility()
         a["representation"] = node.GetRepresentation()   # 0 points,1 wireframe,2 surface
+        if node.IsA("vtkMRMLMarkupsDisplayNode"):        # markups render in SELECTED color (points default to selected)
+            a["selectedColor"] = list(node.GetSelectedColor())   # the color Slicer actually draws (not GetColor)
+            a["activeColor"] = list(node.GetActiveColor())       # hover/active glyph color
+            a["glyphScale"] = node.GetGlyphScale()               # screen-relative glyph size (% when useGlyphScale)
+            a["glyphSize"] = node.GetGlyphSize()                 # absolute glyph size (mm) when !useGlyphScale
+            a["useGlyphScale"] = bool(node.GetUseGlyphScale())
+            a["lineThickness"] = node.GetLineThickness()
+            a["textScale"] = node.GetTextScale()
+            a["pointLabelsVisibility"] = bool(node.GetPointLabelsVisibility())      # per-control-point name labels
+            a["propertiesLabelVisibility"] = bool(node.GetPropertiesLabelVisibility())  # one name+measurements label
+        if node.IsA("vtkMRMLTransformDisplayNode"):      # the interaction widget toggle (linear transform editing)
+            a["editorVisibility"] = bool(node.GetEditorVisibility())
         if node.IsA("vtkMRMLScalarVolumeDisplayNode"):   # grayscale window/level for 2D slice rendering
             a["window"] = node.GetWindow(); a["level"] = node.GetLevel()
         if node.IsA("vtkMRMLVolumeRenderingDisplayNode"):
@@ -290,6 +302,27 @@ def serialize_node(node):
         except TypeError:
             arr = slicer.util.arrayFromMarkupsControlPoints(node)
         a["controlPoints"] = arr.tolist() if arr is not None else []
+        a["pointLabels"] = [node.GetNthControlPointLabel(i) for i in range(node.GetNumberOfControlPoints())]
+        a["selectedFlags"] = [bool(node.GetNthControlPointSelected(i)) for i in range(node.GetNumberOfControlPoints())]
+        meas = []                                          # enabled measurements Slicer prints in the properties label
+        for i in range(node.GetNumberOfMeasurements()):
+            mm = node.GetNthMeasurement(i)
+            if mm is None or not mm.GetEnabled():
+                continue
+            val = ""
+            try:                                           # Slicer's own print format applied to the value -> "144.6mm"
+                fmt = mm.GetPrintFormat()
+                if fmt and mm.GetValue() is not None:
+                    val = fmt % mm.GetValue()
+            except Exception:
+                pass
+            if not val:
+                try:
+                    val = ("%.1f %s" % (mm.GetValue(), mm.GetUnits() or "")).strip()
+                except Exception:
+                    pass
+            meas.append({"name": mm.GetName(), "value": val})
+        a["measurements"] = meas
         a["closed"] = bool(node.IsA("vtkMRMLMarkupsClosedCurveNode"))
         a["connect"] = bool(node.IsA("vtkMRMLMarkupsLineNode") or node.IsA("vtkMRMLMarkupsAngleNode")
                             or node.IsA("vtkMRMLMarkupsCurveNode"))
@@ -302,6 +335,15 @@ def serialize_node(node):
         m = vtk.vtkMatrix4x4()
         node.GetMatrixTransformToParent(m)
         a["matrixToParent"] = _matrix4x4(m)
+        a["linear"] = bool(node.IsLinear())
+        if node.IsLinear():                            # interaction-widget geometry (linear only -- see TODO/vtk.js)
+            a["widgetCenter"] = [m.GetElement(r, 3) for r in range(3)]   # where the origin maps (widget sits here)
+            axes = []
+            for c in range(3):
+                v = [m.GetElement(r, c) for r in range(3)]
+                nrm = (sum(x * x for x in v)) ** 0.5 or 1.0
+                axes.append([x / nrm for x in v])
+            a["axes"] = axes                            # the transform's local axes (= world for identity rotation)
 
     elif node.IsA("vtkMRMLSliceNode"):                     # a 2D slice view: the plane + viewport sizing
         a["layoutName"] = node.GetLayoutName()             # Red / Yellow / Green
@@ -377,7 +419,11 @@ def view_closure(view_index=0):
             _add(closure, dataNode)
             tid = dataNode.GetTransformNodeID() if dataNode.IsA("vtkMRMLTransformableNode") else None
             if tid:
-                _add(closure, slicer.mrmlScene.GetNodeByID(tid))
+                tnode = slicer.mrmlScene.GetNodeByID(tid)
+                _add(closure, tnode)
+                if tnode is not None:                  # + the transform's display node (carries the interaction-widget flag)
+                    for i in range(tnode.GetNumberOfDisplayNodes()):
+                        _add(closure, tnode.GetNthDisplayNode(i))
 
     for cls in ("vtkMRMLModelNode", "vtkMRMLScalarVolumeNode", "vtkMRMLSegmentationNode",
                 "vtkMRMLMarkupsNode"):                     # markups (fiducials/line/curve/ROI) shown in 3D

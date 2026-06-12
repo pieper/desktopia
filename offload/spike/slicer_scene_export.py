@@ -38,6 +38,7 @@ import struct
 import traceback
 import urllib
 
+import qt
 import slicer
 import WebServer
 import WebServerLib
@@ -209,8 +210,8 @@ def viewport_rect(view_index=0):
     over the video's 3D-view region. mapToGlobal gives the widget top-left in screen coords."""
     import qt
     widget = slicer.app.layoutManager().threeDWidget(view_index)
-    if widget is None:
-        raise RuntimeError(f"No 3D widget at index {view_index}")
+    if widget is None or not widget.visible:   # 3D view NOT in the current layout (e.g. a slice maximized) -> no
+        return None                            # overlay -> the client hides host/out + skips the 3D decorations
     tdv = widget.threeDView()
     tl = tdv.mapToGlobal(qt.QPoint(0, 0))
     return {"x": tl.x(), "y": tl.y(), "w": tdv.width, "h": tdv.height}
@@ -228,11 +229,33 @@ def slice_viewports():
         names = ["Red", "Yellow", "Green"]
     for name in names:
         w = lm.sliceWidget(name)
-        if w is None:
-            continue
+        if w is None or not w.visible:        # skip slice views NOT in the current layout (e.g. 3D-only) -- else the
+            continue                          # client keeps compositing their slices on top of the 3D view
         sv = w.sliceView()
         tl = sv.mapToGlobal(qt.QPoint(0, 0))
         out[name] = {"x": tl.x(), "y": tl.y(), "w": sv.width, "h": sv.height}
+    return out
+
+
+def slice_nodes_state():
+    """Re-serialize the current slice VIEW nodes (dimensions + xyToRAS, no blobs) so a geometry push carries
+    the reslice geometry ATOMICALLY with the screen rects -- the client never reslices a NEW rect against
+    STALE node dimensions (the transient wrong-aspect-on-resize bug). Cheap (matrices only); rides every
+    state/pong/geometry-event push."""
+    import mrml_sync
+    out = {}
+    lm = slicer.app.layoutManager()
+    try:
+        names = list(lm.sliceViewNames())
+    except Exception:
+        names = ["Red", "Yellow", "Green"]
+    for name in names:
+        w = lm.sliceWidget(name)
+        if w is None or not w.visible:        # only slice views shown in the current layout (matches slice_viewports)
+            continue
+        sn = w.mrmlSliceNode()
+        if sn is not None:
+            out[sn.GetID()] = mrml_sync.serialize_node(sn)
     return out
 
 
@@ -317,7 +340,8 @@ def view_state(view_index=0):
     """Cheap, poll-this-fast endpoint: the scene fingerprint (re-fetch /scene only when it changes) plus
     the current viewport rect (so the overlay tracks the 3D view live, incl. during window drags)."""
     return {"version": _scene_fingerprint(), "viewport": viewport_rect(view_index),
-            "sliceViewports": slice_viewports(), "segEdit": segment_editor_state()}
+            "sliceViewports": slice_viewports(), "sliceNodes": slice_nodes_state(),
+            "segEdit": segment_editor_state()}
 
 
 def get_camera(view_index=0):
@@ -611,6 +635,21 @@ def _set_markup_point(node_id, index, pos):
         node.SetNthControlPointPositionWorld(int(index), pos[0], pos[1], pos[2])
 
 
+def _set_transform_matrix(node_id, matrix):
+    """Apply a client-edited matrix back to a LINEAR transform node (the transform interaction widget)."""
+    if not node_id or not matrix or len(matrix) != 16:
+        return
+    node = slicer.mrmlScene.GetNodeByID(node_id)
+    if node is None or not node.IsA("vtkMRMLTransformNode") or not node.IsLinear():
+        return
+    import vtk
+    m = vtk.vtkMatrix4x4()
+    for r in range(4):
+        for c in range(4):
+            m.SetElement(r, c, matrix[r * 4 + c])   # row-major (matches mrml_sync._matrix4x4)
+    node.SetMatrixTransformToParent(m)
+
+
 def _ws_on_message(text):
     try:
         m = json.loads(text)
@@ -626,6 +665,10 @@ def _ws_on_message(text):
             _ws.broadcast({"t": "ack"})        # the client gates its next write on this -> rate adapts to RTT
     elif m.get("t") == "mcp":                  # markup control-point move (fiducials/line/curve handles)
         _set_markup_point(m.get("id"), m.get("index"), m.get("pos"))
+        if _ws is not None:
+            _ws.broadcast({"t": "ack"})
+    elif m.get("t") == "transform":            # linear transform interaction widget -> new matrix
+        _set_transform_matrix(m.get("id"), m.get("matrix"))
         if _ws is not None:
             _ws.broadcast({"t": "ack"})
     elif m.get("t") == "ping":
@@ -678,10 +721,74 @@ def _schedule_push():
     _ws_push(False)
 
 
+# --- EVENT-DRIVEN geometry (NO QTimer screen-scraping). Push view/slice geometry when the actual Qt
+# resize/move/layout events fire -- from a Slicer splitter/layout change OR a window-manager resize/move of
+# the Slicer window (both deliver Resize/Move to the view widgets / main window). Replaces the old 50ms poll.
+# A burst of events is coalesced into ONE push via a 0-delay single-shot: event-TRIGGERED, not periodic. ---
+_geom_filters = []          # [(widget, filterObj)] kept alive so the filters aren't GC'd
+_geom_pending = [False]
+
+
+class _GeomFilter(qt.QObject):
+    def eventFilter(self, obj, event):
+        try:
+            if event.type() in (qt.QEvent.Resize, qt.QEvent.Move):
+                _schedule_geom_push()
+        except Exception:
+            pass
+        return False            # never consume the event
+
+
+def _schedule_geom_push():
+    if _geom_pending[0]:
+        return
+    _geom_pending[0] = True
+    qt.QTimer.singleShot(0, _flush_geom_push)     # coalesce a burst of resize/move events into one push
+
+
+def _flush_geom_push():
+    _geom_pending[0] = False
+    _ws_push(force=True)        # geometry changed -> push new rects + slice-node geometry atomically
+
+
+def _install_geom_filters():
+    """(Re)install resize/move event filters on the main window + every view widget. Called once at setup
+    and again on layoutChanged (the widget set changes)."""
+    for w, f in _geom_filters:
+        try:
+            w.removeEventFilter(f)
+        except Exception:
+            pass
+    _geom_filters.clear()
+    lm = slicer.app.layoutManager()
+    widgets = []
+    mw = slicer.util.mainWindow()
+    if mw is not None:
+        widgets.append(mw)                        # WM move/resize of the whole Slicer window
+    try:
+        for name in lm.sliceViewNames():
+            sw = lm.sliceWidget(name)
+            if sw is not None:
+                widgets.append(sw.sliceView())    # slice view resize (splitter/layout)
+    except Exception:
+        pass
+    try:
+        for i in range(lm.threeDViewCount):
+            tw = lm.threeDWidget(i)
+            if tw is not None:
+                widgets.append(tw.threeDView())   # 3D view resize/move
+    except Exception:
+        pass
+    for w in widgets:
+        f = _GeomFilter()
+        w.installEventFilter(f)
+        _geom_filters.append((w, f))
+
+
 def _setup_ws_events():
     """Fully event-driven: MRML changes push the new fingerprint immediately (coalesced ~60fps). New nodes
-    get their own Modified observer as they're added. A light change-only timer tracks the viewport rect
-    during window drags (it broadcasts only when the rect actually changes, so it's not idle polling)."""
+    get their own Modified observer as they're added. View/window GEOMETRY rides Qt resize/move/layout
+    EVENTS (see _install_geom_filters) -- no QTimer screen-scraping."""
     import qt, vtk
     obs_classes = ("vtkMRMLDisplayNode", "vtkMRMLVolumePropertyNode", "vtkMRMLVolumeNode",
                    "vtkMRMLModelNode", "vtkMRMLSegmentationNode", "vtkMRMLTransformNode",
@@ -704,8 +811,12 @@ def _setup_ws_events():
     for cls in obs_classes:
         for n in slicer.util.getNodesByClass(cls):
             observe(n)
-    t = qt.QTimer(); t.setInterval(50); t.timeout.connect(lambda: _ws_push(False)); t.start()  # viewport tracker, change-only
-    _ws_timers.append(t)
+    _install_geom_filters()                       # event-driven view/window geometry (replaces the 50ms poll)
+    try:
+        lm = slicer.app.layoutManager()
+        lm.connect('layoutChanged(int)', lambda *a: (_install_geom_filters(), _schedule_geom_push()))
+    except Exception:
+        pass
 
 
 # ─── WebServer request handler ─────────────────────────────────────────────────
@@ -809,9 +920,22 @@ class SceneExportHandler(WebServerLib.BaseRequestHandler):
 
 # ─── Start ─────────────────────────────────────────────────────────────────────
 
-def startSceneExport(port=2027, logMessage=None):
-    """Start the scene-export server. Returns the WebServerLogic; stop with .stop()."""
+def startSceneExport(port=2027, ws_port=2028, enable_keyhole=True, enable_mcp=False, logMessage=None):
+    """Start the scene-export server. Returns the WebServerLogic; stop with .stop().
+
+    ws_port: the offload control WebSocket port (2028 in prod; the DM-debug harness uses a free pair, e.g.
+             port=2030/ws_port=2031, so it doesn't collide with the Colima container's forwarded 2027/2028).
+    enable_keyhole: prod (over-video) wants the server's own 3D/slice render suppressed + magenta-keyed; the
+             standalone DM harness sets False so it does NOT paint over THIS Slicer's own views."""
     log = logMessage or (lambda *a, **k: None)
+    handlers = [SceneExportHandler(logMessage=log)]
+    if enable_mcp:                                # dev: co-mount the MCP on THIS server (one WebServerLogic; a 2nd
+        try:                                      # WebServerLogic instance doesn't bind reliably). MCP wins /mcp (0.9>0.5).
+            import slicer_mcp_server
+            handlers.append(slicer_mcp_server.MCPRequestHandler(autoAllow=True, logMessage=log))
+            print("offload: MCP handler co-mounted at /mcp", flush=True)
+        except Exception:
+            print("offload: MCP mount FAILED:", traceback.format_exc(), flush=True)
     logic = WebServer.WebServerLogic(
         port=port,
         logMessage=log,
@@ -820,12 +944,12 @@ def startSceneExport(port=2027, logMessage=None):
         enableStaticPages=False,
         enableDICOM=False,
         enableCORS=True,                          # so the standalone client page can fetch us
-        requestHandlers=[SceneExportHandler(logMessage=log)],
+        requestHandlers=handlers,
     )
     logic.start()
     global _ws
     try:
-        _ws = WSServer(2028, _ws_on_message, on_open=_ws_on_open)   # event channel (push scene/viewport, receive camera)
+        _ws = WSServer(ws_port, _ws_on_message, on_open=_ws_on_open)   # event channel (push scene/viewport, receive camera)
         _setup_ws_events()
     except Exception:
         print("offload WS failed:", traceback.format_exc(), flush=True)
@@ -838,12 +962,13 @@ def startSceneExport(port=2027, logMessage=None):
             print("offload: keyhole ON (server 3D + slice content hidden; client renders it)", flush=True)
         except Exception:
             print("offload keyhole enable failed:", traceback.format_exc(), flush=True)
-    try:
-        import qt
-        qt.QTimer.singleShot(8000, _enable_keyhole)
-    except Exception:
-        pass
-    print(f"\n  Desktopia scene-export: http://localhost:{logic.port}/scene  (events: ws://localhost:2028)")
+    if enable_keyhole:
+        try:
+            import qt
+            qt.QTimer.singleShot(8000, _enable_keyhole)
+        except Exception:
+            pass
+    print(f"\n  Desktopia scene-export: http://localhost:{logic.port}/scene  (events: ws://localhost:{ws_port})")
     print("  Stop with: sceneLogic.stop()\n")
     return logic
 
