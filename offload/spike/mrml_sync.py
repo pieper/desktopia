@@ -14,6 +14,9 @@ generic id/class/name/refs record so the closure is still complete. Extending = 
 
 import gzip
 import hashlib
+import json
+import math
+import zlib
 
 import numpy
 import slicer
@@ -22,6 +25,14 @@ from vtk.util import numpy_support as ns
 
 # content-addressed blob cache: md5 -> gzip bytes. Persists for the session; client fetches by hash.
 _blobs = {}
+
+# OME-Zarr object store for chunked volumes: "<volId>.zarr/<path>" -> raw bytes (json metadata / zlib chunks).
+# A volume ships as many parallel-fetchable zarr chunks instead of one monolithic blob (see _zarr_volume).
+_zarr = {}
+
+
+def get_zarr_objects():
+    return _zarr
 
 # Memo for the EXPENSIVE per-node geometry serialization, keyed by the source data object's MTime. A
 # transfer-function edit modifies the volume PROPERTY, not the image data, so the image-data MTime is
@@ -60,7 +71,51 @@ def _arr(np_arr, comps):
     """A typed-array blob descriptor: raw bytes (content-hashed) + how to interpret them on the client.
     No XML -- the client builds vtk.js vtkPolyData/vtkImageData directly from these arrays."""
     np_arr = numpy.ascontiguousarray(np_arr)
-    return {"hash": _blob(np_arr.tobytes()), "dtype": str(np_arr.dtype), "count": int(np_arr.size), "comps": comps}
+    h = _blob(np_arr.tobytes())
+    # "size" = gzipped byte length, so the client can show a real byte-based download progress bar
+    return {"hash": h, "dtype": str(np_arr.dtype), "count": int(np_arr.size), "comps": comps, "size": len(_blobs[h])}
+
+
+def _zarr_volume(vol_id, img):
+    """Write a scalar volume as an OME-Zarr (NGFF v0.4) chunked array into _zarr; return the scene-json ref.
+    Only the chunked voxels + a scale transform live in zarr (NGFF can't express a rotated/oblique acquisition);
+    the AUTHORITATIVE IJK->RAS affine (rotation included) stays in the scene json (attrs.ijkToRAS). Chunks pull
+    in parallel on the client instead of one monolithic blob. zlib codec == client DecompressionStream('deflate')."""
+    sc = img.GetPointData().GetScalars()
+    if sc is None or sc.GetNumberOfComponents() != 1:
+        return None                                       # multi-component -> caller falls back to a single blob
+    nx, ny, nz = img.GetDimensions()
+    a = numpy.ascontiguousarray(ns.vtk_to_numpy(sc).reshape(nz, ny, nx))   # (k,j,i) == VTK order, x-fastest
+    cz, cy, cx = min(64, nz), min(128, ny), min(128, nx)
+    base = vol_id + ".zarr"
+    sp = img.GetSpacing()                                 # (sx,sy,sz) -- NGFF scale only (rotation -> scene json)
+    _zarr[base + "/.zgroup"] = json.dumps({"zarr_format": 2}).encode()
+    _zarr[base + "/.zattrs"] = json.dumps({"multiscales": [{
+        "version": "0.4", "name": vol_id,
+        "axes": [{"name": "z", "type": "space", "unit": "millimeter"},
+                 {"name": "y", "type": "space", "unit": "millimeter"},
+                 {"name": "x", "type": "space", "unit": "millimeter"}],
+        "datasets": [{"path": "0", "coordinateTransformations": [
+            {"type": "scale", "scale": [sp[2], sp[1], sp[0]]}]}]}]}).encode()
+    _zarr[base + "/0/.zarray"] = json.dumps({
+        "zarr_format": 2, "shape": [nz, ny, nx], "chunks": [cz, cy, cx], "dtype": a.dtype.str,
+        "compressor": {"id": "zlib", "level": 1}, "fill_value": 0, "order": "C",
+        "filters": None, "dimension_separator": "."}).encode()
+    ncz, ncy, ncx = math.ceil(nz / cz), math.ceil(ny / cy), math.ceil(nx / cx)
+    nbytes = 0
+    for kk in range(ncz):
+        for jj in range(ncy):
+            for ii in range(ncx):
+                sub = a[kk * cz:(kk + 1) * cz, jj * cy:(jj + 1) * cy, ii * cx:(ii + 1) * cx]
+                if sub.shape != (cz, cy, cx):             # edge chunk: zarr stores FULL chunk shape, padded w/ fill
+                    pad = numpy.zeros((cz, cy, cx), dtype=a.dtype)
+                    pad[:sub.shape[0], :sub.shape[1], :sub.shape[2]] = sub
+                    sub = pad
+                comp = zlib.compress(numpy.ascontiguousarray(sub).tobytes(), 1)
+                _zarr[base + "/0/%d.%d.%d" % (kk, jj, ii)] = comp
+                nbytes += len(comp)
+    return {"dir": base, "dataset": "0", "shape": [nz, ny, nx], "chunks": [cz, cy, cx],
+            "chunkGrid": [ncz, ncy, ncx], "dtype": a.dtype.str, "bytes": nbytes}
 
 
 def _pd_blobs(pd):
@@ -253,10 +308,16 @@ def serialize_node(node):
 
     elif node.IsA("vtkMRMLScalarVolumeNode"):
         img = node.GetImageData()
-        scb, meta = _cached(node.GetID() + ":img", img, lambda: _img_blobs(img))
-        if scb:
-            b.update(scb)                                  # scalars (memoized: not re-gzipped per TF edit)
-            a.update(meta)                                 # dims, comps
+        z = _cached(node.GetID() + ":zarr", img, lambda: _zarr_volume(node.GetID(), img)) if img else None
+        if z:                                              # chunked OME-Zarr (parallel fetch); voxels not a blob
+            a["zarr"] = z
+            a["dims"] = [z["shape"][2], z["shape"][1], z["shape"][0]]   # (x,y,z) like img.GetDimensions()
+            a["comps"] = 1
+        else:                                              # multi-component (e.g. RGB) -> single blob fallback
+            scb, meta = _cached(node.GetID() + ":img", img, lambda: _img_blobs(img))
+            if scb:
+                b.update(scb)                              # scalars (memoized: not re-gzipped per TF edit)
+                a.update(meta)                             # dims, comps
         m = vtk.vtkMatrix4x4(); node.GetIJKToRASMatrix(m)
         a["ijkToRAS"] = _matrix4x4(m)
 
