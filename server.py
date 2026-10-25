@@ -33,6 +33,7 @@ Gst.init(None)
 MTU = 1100                          # safe QUIC datagram payload (path MTU ~1200)
 HDR = struct.Struct(">IBHH")        # frame_id(u32), flags(u8), n_chunks(u16), chunk_idx(u16)
 FLAG_KEY = 0x01
+MAX_PENDING = 256                   # floor on a viewer's queued video datagrams (~280 KB) before a flush
 # Defaults for capture size / rate / bitrate (overridable via CLI -- the CPU/Colab path drops these
 # to e.g. 1280x720@15 so software encode keeps up). The keyframe interval is tied to fps (= ~1s).
 DEF_W, DEF_H, DEF_FPS, DEF_BITRATE = 1920, 1080, 60, 12000
@@ -290,6 +291,8 @@ class StreamProtocol(QuicConnectionProtocol):
         self._ctrlbuf = b""
         self._stype = {}        # stream_id -> 'I'(nput) | 'C'(ontrol), classified by first byte
         self._ctrl_out = None   # server->client control stream id (NDJSON: pong, clip, status)
+        self._need_key = False  # backlog was flushed: drop deltas until the next keyframe (send_video)
+        self._key_chunks = 0    # datagrams in the last keyframe, to size the backlog limit
 
     def quic_event_received(self, event):
         if isinstance(event, ProtocolNegotiated):
@@ -371,6 +374,25 @@ class StreamProtocol(QuicConnectionProtocol):
         body = MTU - HDR.size
         chunks = [data[i:i + body] for i in range(0, len(data), body)] or [b""]
         n = len(chunks); flags = FLAG_KEY if is_key else 0
+        # Bound the backlog. aioquic queues DATAGRAM frames in an unbounded deque that its congestion
+        # controller drains at whatever the path allows; when that is below the encoder's rate (a far
+        # host: 1.8 Mbps arriving vs 12 Mbps encoded, ~235 ms RTT) the queue -- and so the delay of
+        # every frame, i.e. how late input appears to take effect -- grows without limit (+2 MB/s of
+        # server RSS per viewer, 30 s+ behind within minutes). Same policy as WSSession's drop-oldest:
+        # past ~2 keyframes' worth queued, discard the stale video and skip deltas until the next
+        # keyframe, so the viewer jumps to now instead of playing out the backlog.
+        pend = getattr(self._quic, "_datagrams_pending", None)
+        if pend is not None:
+            if is_key:
+                self._key_chunks = n
+                if self._need_key or len(pend) > n: pend.clear()   # nothing queued matters past a keyframe
+                self._need_key = False
+            elif self._need_key:
+                return
+            elif len(pend) > max(MAX_PENDING, 2 * self._key_chunks):
+                pend.clear(); self._need_key = True
+                self.broadcaster.force_keyframe()
+                return
         for idx, c in enumerate(chunks):
             self.send_video_datagram(HDR.pack(fid, flags, n, idx) + c)
 

@@ -1,5 +1,6 @@
 # Thin wrapper over vast.sh. See vast.sh for details.
-.PHONY: search best up up-best up-ghcr ls ssh sync wl-build wl-fixwayland wl-setup stream port pull status logs stop start down debug
+.PHONY: search best up up-best up-ghcr ls ssh sync wl-build wl-fixwayland wl-setup stream port pull status logs stop start down debug \
+        slicer-up tunnel tunnel-close mcp-ready push-module slicer-restart
 
 # --- rent / connect ---
 search:    ; ./vast.sh search
@@ -30,3 +31,11 @@ down:      ; ./vast.sh down
 
 # --- diagnostics (debug_utils/<name>.sh) ---
 debug:     ; ./vast.sh debug $(SCRIPT)    # e.g. make debug SCRIPT=nvenc-check
+
+# --- Slicer dev box over MCP (.claude/skills/vast-slicer/SKILL.md) ---
+slicer-up:      ; ./vast.sh slicer-up          # rent + stream + Slicer stable with MCP on :2026
+tunnel:         ; ./vast.sh tunnel             # localhost:2026 -> the box
+tunnel-close:   ; ./vast.sh tunnel-close
+mcp-ready:      ; ./vast.sh mcp wait-ready
+push-module:    ; ./vast.sh push-module $(DIR) $(NAME)   # e.g. make push-module DIR=~/src/MyExt/MyModule
+slicer-restart: ; ./vast.sh slicer-restart

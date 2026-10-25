@@ -145,6 +145,23 @@ make down                   # destroy the instance (stops billing)
 `vast.sh` targets `the first running instance`; set `DESKTOPIA_INSTANCE=<id>` to pin a specific
 one when several are running.
 
+### Slicer dev box over MCP
+
+To test a Slicer module or extension on a real GPU, and drive it from Claude Code or a script:
+
+```bash
+./vast.sh slicer-up            # = DESKTOPIA_MCP=1 launch.py: rent, stream, Slicer stable + MCP on :2026
+./vast.sh tunnel               # localhost:2026 -> the box (the port is not public)
+./vast.sh mcp wait-ready       # then: mcp tools | mcp py '<code>' | mcp screenshot out.png
+./vast.sh push-module ~/src/MyExtension/MyModule      # into ~/slicer-modules, loaded live
+./vast.sh tunnel-close && ./vast.sh stop              # or down
+```
+
+- `.claude/skills/vast-slicer/SKILL.md` is the full procedure, including the rules for code sent
+  over MCP and a SlicerHaversack test recipe.
+- The flag reaches the box in `/root/desktopia/.desktopia.env`, so a `stop`/`start` comes back
+  with MCP on.
+
 ---
 
 ## 5. Launch parameters (reference)

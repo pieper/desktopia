@@ -10,6 +10,10 @@ __pycache__/
 
 # runtime launcher status
 client/status.json
+# vast machine_ids launch.py rejected (no hardware GLX); excluded from later offer searches
+.bad-machines
+# launch.py's measured host qualifications (rtt/bandwidth from THIS machine); offers.py ranks by them
+.host-tests.jsonl
 
 # offload dev/test screenshots (regenerable)
 offload/spike/_*.png

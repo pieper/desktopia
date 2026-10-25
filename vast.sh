@@ -4,6 +4,7 @@
 #
 #   ./vast.sh search                 # list cheap single-RTX-4090 offers
 #   ./vast.sh best                   # print the single best OFFER_ID
+#   ./vast.sh candidates [N]         # N offer ids from N different providers (what launch.py tests)
 #   ./vast.sh up <OFFER_ID> [ghcr]   # create instance (default base image; 'ghcr' = built image)
 #   ./vast.sh ls                     # show instances + mapped ports
 #   ./vast.sh ssh [ssh-args...]      # ssh into the (first) instance; extra args pass to ssh,
@@ -19,14 +20,30 @@
 #   ./vast.sh down                   # destroy the instance (deletes disk, stops all billing)
 #   ./vast.sh debug <name>           # run debug_utils/<name>.sh on the instance
 #
+# Slicer dev box, driven over MCP (.claude/skills/vast-slicer/SKILL.md):
+#   ./vast.sh slicer-up              # launch.py with DESKTOPIA_MCP=1: rent, stream, Slicer stable + MCP :2026
+#   ./vast.sh probe                  # rent+test N candidates (DESKTOPIA_CANDIDATES=3), record, destroy all
+#   ./vast.sh tunnel [port]          # background ssh -L port:localhost:port (default 2026)
+#   ./vast.sh tunnel-close           # end it
+#   ./vast.sh mcp <args...>          # scripts/mcp_call.py: tools | py CODE | py -f FILE | call TOOL JSON
+#                                    #   | screenshot OUT.png | wait-ready
+#   ./vast.sh run '<command>'        # run one command on the box (no TTY; for scripts)
+#   ./vast.sh push <local> <remote>  # rsync a file/dir to the box (owned by `user` under /home/user)
+#   ./vast.sh push-module <dir> [name]  # a scripted module to ~/slicer-modules/<name>, loaded live
+#   ./vast.sh slicer-restart         # kill Slicer and relaunch it in the desktop session
+#
 # Set DESKTOPIA_INSTANCE to pin a specific id; otherwise the first running one is used.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# the vastai CLI lives in the repo's venv (SETUP.md), as launch.py assumes
+export PATH="$HERE/.venv/bin:$PATH"
 # SSH identity. vast authenticates with a key you registered; if it's a NON-default name
 # (e.g. ~/.ssh/vast-ai-rsa) ssh won't offer it unless it's in your agent. Set
 # DESKTOPIA_SSH_KEY=~/.ssh/vast-ai-rsa to point ssh/rsync straight at it (-i, IdentitiesOnly).
 SSH_OPTS="-o StrictHostKeyChecking=accept-new"
+# launch.py defaults to ~/.ssh/vast-ai-rsa; so does this, when that key exists.
+if [ -z "${DESKTOPIA_SSH_KEY:-}" ] && [ -f "$HOME/.ssh/vast-ai-rsa" ]; then DESKTOPIA_SSH_KEY=~/.ssh/vast-ai-rsa; fi
 if [ -n "${DESKTOPIA_SSH_KEY:-}" ]; then
   SSH_OPTS="$SSH_OPTS -i ${DESKTOPIA_SSH_KEY/#\~/$HOME} -o IdentitiesOnly=yes"
 fi
@@ -69,6 +86,13 @@ remote() {
   local PORT USER_ HOST; read -r PORT USER_ HOST < <(ssh_parts)
   ssh -t $SSH_OPTS -p "$PORT" "$USER_@$HOST" "$@"
 }
+# The same without a TTY, for commands whose output a script reads (and for non-interactive callers).
+rsh() {
+  local PORT USER_ HOST; read -r PORT USER_ HOST < <(ssh_parts)
+  ssh $SSH_OPTS -p "$PORT" "$USER_@$HOST" "$@"
+}
+TUNNEL_SOCK="$HOME/.ssh/desktopia-tunnel.sock"
+MCP_PORT=${DESKTOPIA_MCP_PORT:-2026}
 
 cmd=${1:-help}; shift || true
 case "$cmd" in
@@ -76,6 +100,8 @@ case "$cmd" in
     vastai search offers "$SEARCH_Q" -o dph_total --raw | python3 "$HERE/scripts/offers.py" list ;;
   best)    # print the single best OFFER_ID (cheapest with high PCIe) for `make up`
     vastai search offers "$SEARCH_Q" -o dph_total --raw | python3 "$HERE/scripts/offers.py" best ;;
+  candidates)  # print up to N offer ids from N different providers (launch.py rents + tests them in parallel)
+    vastai search offers "$SEARCH_Q" -o dph_total --raw | python3 "$HERE/scripts/offers.py" candidates "${1:-3}" ;;
   up-best) "$0" up "$("$0" best)" "${1:-base}" ;;
   up)
     offer=${1:?need OFFER_ID}; sel=${2:-base}
@@ -129,6 +155,64 @@ case "$cmd" in
   pull)      # pull a file from the instance: make pull REMOTE=/path [LOCAL=./]
     PORT="" USER_="" HOST=""; read -r PORT USER_ HOST < <(ssh_parts)
     rsync -av -e "ssh $SSH_OPTS -p $PORT" "$USER_@$HOST:${1:?need REMOTE path}" "${2:-./}" ;;
+  slicer-up)  # rent + stream + Slicer with MCP; blocks serving the page (prints "=== READY ===")
+    # launch.py's ssh is BatchMode: a passphrase-protected key not loaded in the agent is accepted by
+    # the box and then never signed ("Connection closed by authenticating user ... [preauth]" in the
+    # container log), and the run burns a rented box waiting. Catch it before renting.
+    key=${DESKTOPIA_SSH_KEY:-~/.ssh/vast-ai-rsa}; key=${key/#\~/$HOME}
+    if ! ssh-keygen -y -P "" -f "$key" >/dev/null 2>&1; then
+      fp=$(ssh-keygen -lf "$key.pub" 2>/dev/null | awk '{print $2}')
+      if [ -z "$fp" ] || ! ssh-add -l 2>/dev/null | grep -qF "$fp"; then
+        echo "$key has a passphrase and is not in ssh-agent; first run:" >&2
+        echo "  ssh-add --apple-use-keychain $key" >&2
+        exit 1
+      fi
+    fi
+    cd "$HERE" && DESKTOPIA_MCP=1 DESKTOPIA_MCP_PORT="$MCP_PORT" exec python3 launch.py ;;
+  probe)      # rent N candidates (default 3, DESKTOPIA_CANDIDATES), measure + record them, destroy all
+    cd "$HERE" && DESKTOPIA_PROBE=1 exec python3 launch.py ;;
+  tunnel)     # localhost:PORT -> the box's PORT (Slicer MCP), backgrounded behind a control socket
+    port=${1:-$MCP_PORT}
+    PORT="" USER_="" HOST=""; read -r PORT USER_ HOST < <(ssh_parts)
+    if ssh -S "$TUNNEL_SOCK" -O check "$USER_@$HOST" 2>/dev/null; then
+      echo "tunnel already open ($TUNNEL_SOCK); ./vast.sh tunnel-close to end it"; exit 0
+    fi
+    if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+      # e.g. a local Slicer with its own MCP server: ssh's localhost bind still wins over its wildcard
+      # bind, but `mcp` calls would reach the local one the moment the tunnel drops. Say so.
+      echo "warning: something already listens on local port $port:" >&2
+      lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | tail -n +2 >&2
+      echo "  (to avoid it: DESKTOPIA_MCP_PORT=<other> for slicer-up, tunnel and mcp)" >&2
+    fi
+    ssh $SSH_OPTS -f -N -M -S "$TUNNEL_SOCK" -o ExitOnForwardFailure=yes \
+      -o ServerAliveInterval=15 -L "$port:localhost:$port" -p "$PORT" "$USER_@$HOST"
+    echo "tunnel: http://localhost:$port/mcp -> $HOST:$PORT" ;;
+  tunnel-close)
+    PORT="" USER_="" HOST=""; read -r PORT USER_ HOST < <(ssh_parts)
+    ssh -S "$TUNNEL_SOCK" -O exit "$USER_@$HOST" ;;
+  run)        # run '<command>': one command on the box, output to stdout (`ssh` takes ssh options instead)
+    rsh "${1:?need a command}" ;;
+  mcp)        # scripts/mcp_call.py against the tunnel
+    exec python3 "$HERE/scripts/mcp_call.py" --url "http://localhost:$MCP_PORT/mcp" "$@" ;;
+  push)       # push LOCAL REMOTE: rsync to the box; anything under /home/user is handed to `user`
+    src=${1:?need LOCAL path}; dst=${2:?need REMOTE path}
+    PORT="" USER_="" HOST=""; read -r PORT USER_ HOST < <(ssh_parts)
+    case "$dst" in /home/user/*) rsh "sudo -u user mkdir -p '$(dirname "$dst")'";;
+                   *) rsh "mkdir -p '$(dirname "$dst")'";; esac
+    rsync -a --exclude '.git' --exclude '__pycache__' --exclude '.venv' --exclude '.pytest_cache' \
+      -e "ssh $SSH_OPTS -p $PORT" "$src" "$USER_@$HOST:$dst"
+    case "$dst" in /home/user/*) rsh "chown -R user:user '$dst'";; esac ;;
+  push-module)  # push-module DIR [NAME]: a scripted module (DIR/NAME.py) into ~/slicer-modules, loaded now
+    dir=${1:?need a module directory}; dir=${dir%/}; name=${2:-$(basename "$dir")}
+    [ -f "$dir/$name.py" ] || { echo "$dir has no $name.py - not a scripted module directory" >&2; exit 1; }
+    "$0" push "$dir/" "/home/user/slicer-modules/$name/"
+    "$0" mcp py "import desktopia_dev; __result = desktopia_dev.load_modules()" ;;
+  slicer-restart)  # as `user`, in the session's own environment (saved by session-wayland.sh)
+    # The pkill pattern must not match this bash -c's own command line (which says /opt/Slicer-*/), or
+    # it kills itself before the relaunch; [0-9] only matches a real versioned install path.
+    rsh "sudo -u user -H bash -c 'pkill -f \"/opt/Slicer-[0-9][^ ]*/(Slicer|bin/SlicerApp-real)\" ; sleep 2; . /home/user/.desktopia-session.env; \
+      S=\$(ls -d /opt/Slicer-*/ | head -1); setsid \"\$S/Slicer\" --no-splash >/tmp/slicer.log 2>&1 </dev/null &'"
+    echo "Slicer restarting; ./vast.sh mcp wait-ready" ;;
   status)
     vastai show instance "$(instance_id)" --raw | python3 -c '
 import sys, json
@@ -145,5 +229,5 @@ for k in ("actual_status","intended_status","cur_state","next_state","status_msg
   stop)  vastai stop instance "$(instance_id)" ;;
   start) vastai start instance "$(instance_id)" ;;
   down|destroy) vastai destroy instance "$(instance_id)" ;;
-  *) sed -n '2,30p' "$0" ;;
+  *) sed -n '2,33p' "$0" ;;
 esac

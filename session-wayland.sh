@@ -85,11 +85,15 @@ ulimit -n 65536 2>/dev/null || true
 # --- user folders for downloads / data to drag into Slicer (HOME is /home/user) ---
 mkdir -p ~/Data ~/Downloads
 
+# ~/.slicerrc.py is assembled from the blocks below (offload, dev MCP), each appending; it is reset
+# first only when one of them is on, so a hand-written slicerrc survives a plain desktop boot. ---
+if [ -n "${DESKTOPIA_OFFLOAD:-}${DESKTOPIA_MCP:-}" ]; then : > ~/.slicerrc.py; fi
+
 # --- 3D-offload (DESKTOPIA_OFFLOAD): a ~/.slicerrc.py that, once Slicer is up, starts the scene-export
 # server (serves the 3D view's VTK scene at :2027 for a browser client to render on the client GPU) and
 # loads a demo volume so there's something to render. Spike path; serializer is vendored beside it. ---
 if [ -n "${DESKTOPIA_OFFLOAD:-}" ]; then
-  cat > ~/.slicerrc.py <<PY
+  cat >> ~/.slicerrc.py <<PY
 import sys, qt, os
 sys.path.insert(0, "$PWD/offload/spike")
 def _offload_start():
@@ -179,6 +183,28 @@ qt.QTimer.singleShot(6000, _offload_start)
 PY
 fi
 
+# --- dev MCP (DESKTOPIA_MCP, set by `vast.sh slicer-up` via /root/desktopia/.desktopia.env): Slicer's MCP
+# server on :${DESKTOPIA_MCP_PORT:-2026} (reached only over `vast.sh tunnel`; not in vast's port map),
+# and every scripted module rsynced to ~/slicer-modules/ by `vast.sh push-module`, loaded at startup.
+# scripts/slicer/desktopia_dev.py holds both. ---
+if [ -n "${DESKTOPIA_MCP:-}" ]; then
+  cat >> ~/.slicerrc.py <<PY
+import sys, qt
+sys.path.insert(0, "$PWD/scripts/slicer")
+def _desktopia_dev_start():
+    import desktopia_dev
+    try:
+        desktopia_dev.start_mcp()
+    except Exception as ex:
+        print("DESKTOPIA dev: MCP FAILED:", ex, flush=True)
+    try:
+        print("DESKTOPIA dev: modules", desktopia_dev.load_modules(), flush=True)
+    except Exception as ex:
+        print("DESKTOPIA dev: module load FAILED:", ex, flush=True)
+qt.QTimer.singleShot(3000, _desktopia_dev_start)
+PY
+fi
+
 # --- openbox config: single desktop + no wheel desktop-switching (resources/openbox-rc.xml), so the
 # scroll wheel only ever reaches the app (Slicer) instead of flipping workspaces ---
 mkdir -p ~/.config/openbox
@@ -215,10 +241,15 @@ setbg "$SPLASH"
 # --- launch Slicer as soon as its background download lands (over the splash); the desktop + stream
 # are already live by now (the cert is printed below before this returns). Clear the "please wait"
 # afterward. Falls back to glxgears if Slicer never arrives. ---
+export -p > ~/.desktopia-session.env      # what `vast.sh slicer-restart` (re)launches Slicer with
 (
-  for _ in $(seq 1 150); do
+  # Wait for entrypoint's fetch to report done/failed in its log, not for $SDIR/Slicer: the 475 MB
+  # tarball streams into /opt, so the launcher exists mid-extract, and on a slow host (~1.3 MB/s seen)
+  # the fetch outlasts any short fixed wait. Up to 20 min; an already-installed Slicer has no log.
+  for _ in $(seq 1 600); do
     SDIR=$(ls -d /opt/Slicer-*/ 2>/dev/null | head -1)
-    [ -n "$SDIR" ] && [ -x "$SDIR/Slicer" ] && break
+    if [ -f /tmp/slicer-fetch.log ]; then grep -q -E "Slicer ready|Slicer fetch failed" /tmp/slicer-fetch.log && break
+    elif [ -n "$SDIR" ] && [ -x "$SDIR/Slicer" ]; then break; fi
     sleep 2
   done
   if [ -n "${SDIR:-}" ] && [ -x "$SDIR/Slicer" ]; then

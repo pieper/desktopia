@@ -5,6 +5,9 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 export DEBIAN_FRONTEND=noninteractive
+# The run's DESKTOPIA_* settings (launch.py writes them beside the code, e.g. DESKTOPIA_MCP=1 for
+# `vast.sh slicer-up`). On the persistent disk, so the onstart's boot after a vast stop/start keeps them.
+if [ -f ./.desktopia.env ]; then set -a; . ./.desktopia.env; set +a; fi
 
 # NOTE: do NOT touch /root/.ssh here. vast injects + maintains the SSH key itself; chmod'ing it
 # (or `vastai attach ssh`) races vast's key management and leaves authorized_keys in a state sshd
@@ -155,8 +158,11 @@ fi
 if ! ls -d /opt/Slicer-*/ >/dev/null 2>&1; then
   ( echo "fetching 3D Slicer..."; mkdir -p /opt
     curl -L --retry 3 "https://download.slicer.org/download?os=linux&stability=release" \
-      | tar -xz -C /opt && echo "Slicer ready" || echo "Slicer fetch failed" ) >/tmp/slicer-fetch.log 2>&1 &
+      | tar -xz -C /opt && chown -R user:user /opt/Slicer-*/ && echo "Slicer ready" \
+      || echo "Slicer fetch failed" ) >/tmp/slicer-fetch.log 2>&1 &
 fi
+# Slicer runs as `user`, so its tree must be user's: slicer.util.pip_install (any extension that pulls
+# a package) writes into its site-packages, and failed with "Permission denied" on a root-owned tree.
 
 # --- persistent WebTransport cert (ECDSA P-256, <=14d). Migrate the old /root cert so the
 # pasted hash stays stable; regenerate only when missing/near-expiry. Owned by 'user'. ---
@@ -181,5 +187,5 @@ exec sudo -u user -H env HOME=/home/user \
   DESKTOPIA_HEIGHT="${DESKTOPIA_HEIGHT:-}" DESKTOPIA_FPS="${DESKTOPIA_FPS:-}" \
   DESKTOPIA_BITRATE="${DESKTOPIA_BITRATE:-}" \
   DESKTOPIA_OFFLOAD="${DESKTOPIA_OFFLOAD:-}" \
-  DESKTOPIA_MCP="${DESKTOPIA_MCP:-}" \
+  DESKTOPIA_MCP="${DESKTOPIA_MCP:-}" DESKTOPIA_MCP_PORT="${DESKTOPIA_MCP_PORT:-}" \
   bash "$RUN_DIR/session-wayland.sh"

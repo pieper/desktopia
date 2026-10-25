@@ -3,8 +3,9 @@
 latency tier then price.
 
 Usage:
-  vastai search offers ... --raw | python3 scripts/offers.py list   # table
-  vastai search offers ... --raw | python3 scripts/offers.py best   # one ID for `make up`
+  vastai search offers ... --raw | python3 scripts/offers.py list          # table
+  vastai search offers ... --raw | python3 scripts/offers.py best          # one ID for `make up`
+  vastai search offers ... --raw | python3 scripts/offers.py candidates 3  # IDs from 3 different hosts
 
 Ranking: each offer's `geolocation` ("US, Texas" / "CA, Quebec") is mapped to a centroid,
 great-circle distance to your origin gives an estimated RTT, offers are bucketed into
@@ -12,8 +13,10 @@ TIER_MS-wide latency tiers, and within a tier the cheaper wins. So a closer host
 beats a farther one, but among comparably-close hosts cost decides.
 
 Origin defaults to Boston; override with DESKTOPIA_ORIGIN="lat,lon".
-The RTT number is a coarse *model estimate* (distance + routing overhead), not a measurement
-— confirm with a real ping once an instance is up.
+The RTT number is a coarse *model estimate* (distance + routing overhead), not a measurement,
+and vast's geolocation can be plain wrong (a "Pennsylvania" host measured 240 ms from Boston: UK).
+So when launch.py has MEASURED a provider (host_id) before, its latest measured RTT from
+.host-tests.jsonl replaces the estimate; those rows are marked `*` in the table.
 """
 import sys, os, json, math
 
@@ -122,6 +125,24 @@ def tier(rtt):
     return int(rtt // TIER_MS)
 
 
+HOST_TESTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".host-tests.jsonl")
+
+def measured_rtts():
+    """host_id -> latest measured rtt_ms (launch.py's qualification history)."""
+    out = {}
+    try:
+        for line in open(HOST_TESTS):
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if r.get("host_id") is not None and r.get("rtt_ms") is not None:
+                out[r["host_id"]] = r["rtt_ms"]
+    except FileNotFoundError:
+        pass
+    return out
+
+
 def load():
     raw = sys.stdin.read().strip()
     if not raw:
@@ -130,8 +151,10 @@ def load():
         xs = json.loads(raw)
     except json.JSONDecodeError:
         sys.exit("vastai did not return JSON:\n" + raw[:500])
+    meas = measured_rtts()
     for o in xs:
-        o["_rtt"] = est_rtt(o)
+        o["_measured"] = o.get("host_id") in meas
+        o["_rtt"] = meas[o["host_id"]] if o["_measured"] else est_rtt(o)
     # closest tier first, then cheapest within the tier
     xs.sort(key=lambda o: (tier(o["_rtt"]), o.get("dph_total", 1e9)))
     return xs
@@ -144,7 +167,7 @@ def fmt_table(xs):
     print('-' * len(h))
     for o in xs[:25]:
         rtt = o["_rtt"]
-        ms = f"{rtt:.0f}" if rtt < UNKNOWN_RTT else "  ?"
+        ms = (f"{rtt:.0f}" if rtt < UNKNOWN_RTT else "  ?") + ("*" if o["_measured"] else "")
         print(f"{o.get('id',0):>9} {ms:>4} {o.get('dph_total',0):>6.3f} "
               f"{str(o.get('geolocation') or '')[:16]:<16} "
               f"{o.get('inet_up',0) or 0:>5.0f} {o.get('inet_down',0) or 0:>5.0f} "
@@ -153,7 +176,8 @@ def fmt_table(xs):
               f"{o.get('disk_space',0) or 0:>5.0f} {str(o.get('cuda_max_good') or ''):>4}")
     sys.stdout.flush()
     print(f"\n{len(xs)} offers, ranked by ~{TIER_MS:.0f}ms latency tier then price "
-          f"(origin {ORIGIN[0]:.2f},{ORIGIN[1]:.2f}). ~ms is a model estimate, not a ping. "
+          f"(origin {ORIGIN[0]:.2f},{ORIGIN[1]:.2f}). ~ms is a model estimate, not a ping "
+          f"(* = measured by an earlier launch). "
           f"Prefer PCIe >= {MIN_PCIE:.0f}.", file=sys.stderr)
 
 
@@ -168,10 +192,30 @@ def fmt_best(xs):
     print(o.get("id"))
 
 
+def fmt_candidates(xs, k):
+    """Up to k offers, closest-then-cheapest, at most one per host_id: one provider's fleet tends to
+    share its network and its kernel config (e.g. nvidia-drm modeset=N), so k offers from one host
+    would be one sample, not k. Hosts that miss the PCIe floor fill in only if there aren't enough."""
+    qualified = [o for o in xs if (o.get("pcie_bw", 0) or 0) >= MIN_PCIE]
+    picked, hosts = [], set()
+    for o in qualified + [o for o in xs if o not in qualified]:
+        if len(picked) == k: break
+        if o.get("host_id") in hosts: continue
+        hosts.add(o.get("host_id")); picked.append(o)
+    for o in picked:
+        print(f"candidate: id={o.get('id')} host={o.get('host_id')} ~{o['_rtt']:.0f}ms"
+              f"{'*' if o['_measured'] else ''} ${o.get('dph_total',0):.3f}/hr {o.get('geolocation') or '?'} "
+              f"PCIe={o.get('pcie_bw',0) or 0:.1f}", file=sys.stderr)
+        print(o.get("id"))
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "list"
     xs = load()
-    (fmt_best if mode == "best" else fmt_table)(xs)
+    if mode == "candidates":
+        fmt_candidates(xs, int(sys.argv[2]) if len(sys.argv) > 2 else 3)
+    else:
+        (fmt_best if mode == "best" else fmt_table)(xs)
 
 
 if __name__ == "__main__":
