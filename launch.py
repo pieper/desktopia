@@ -155,7 +155,9 @@ def candidate_offers(k, skip_hosts=()):
     r = subprocess.run(["bash", os.path.join(HERE, "vast.sh"), "candidates", str(k)], env=env,
                        capture_output=True, text=True, timeout=120)
     if r.stderr.strip(): print(r.stderr.strip(), flush=True)
-    return [l.strip() for l in r.stdout.splitlines() if l.strip().isdigit()]
+    # offers.py's "candidate: id=N ... ~Rms" lines carry each offer's ranking RTT (measured or estimated)
+    est = {m.group(1): float(m.group(2)) for m in re.finditer(r"candidate: id=(\d+) .*?~(\d+(?:\.\d+)?)ms", r.stderr)}
+    return [(l.strip(), est.get(l.strip())) for l in r.stdout.splitlines() if l.strip().isdigit()]
 def create(offer):
     r = cli(["create", "instance", offer, "--image", BASE_IMG, "--env", ENVOPTS,
              "--disk", "40", "--ssh", "--direct", "--onstart-cmd", ONSTART])
@@ -357,7 +359,10 @@ def main():
 
 CANDIDATES = int(os.environ.get("DESKTOPIA_CANDIDATES", "3"))   # boxes rented and tested in parallel
 ROUNDS     = int(os.environ.get("DESKTOPIA_ROUNDS", "2"))
-GRACE_S    = 45     # after the first candidate passes, how long the others get to finish testing
+# Once one candidate passes, stop at once if no untested candidate could beat it (its ranking RTT is
+# no better), else wait up to GRACE_S for those: the closest offers can be the slowest to boot (a
+# 45 s cut once dropped two ~12 ms candidates still booting in favor of a 62 ms pass).
+GRACE_S    = 240
 QUALIFY_S  = 600    # whole round's deadline (boot + image pull + ssh + tests)
 
 def pick_host(rnd, tried):
@@ -369,10 +374,10 @@ def pick_host(rnd, tried):
     if not offers:
         say("No offers matched."); time.sleep(5); return None
     cands = []
-    for offer in offers:
+    for offer, est_ms in offers:
         iid = create(offer)
         print(f"[round {rnd}] offer={offer} -> instance={iid}", flush=True)
-        if iid: cands.append({"iid": iid, "offer": offer, "phase": "created"})
+        if iid: cands.append({"iid": iid, "offer": offer, "est_ms": est_ms, "phase": "created"})
     if not cands:
         say("Create failed."); time.sleep(5); return None
     for c in cands: threading.Thread(target=qualify, args=(c,), daemon=True).start()
@@ -385,7 +390,11 @@ def pick_host(rnd, tried):
         n_done = sum(bool(c.get("done")) for c in cands)
         write_status(headline=f"{n_done}/{len(cands)} candidates tested, {len(oks)} passed",
                      log_container="\n".join(describe(c) for c in cands), log_daemon="")
-        if n_done == len(cands) or (first_ok and time.time() - first_ok > GRACE_S) or time.time() - t0 > QUALIFY_S:
+        best = min((c["rtt_ms"] for c in oks), default=None)
+        could_beat = [c for c in cands if not c.get("done") and best is not None
+                      and (c.get("est_ms") is None or c["est_ms"] < best)]
+        if (n_done == len(cands) or (first_ok and (not could_beat or time.time() - first_ok > GRACE_S))
+                or time.time() - t0 > QUALIFY_S):
             break
         time.sleep(3)
 

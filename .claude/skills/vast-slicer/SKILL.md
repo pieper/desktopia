@@ -1,67 +1,105 @@
 ---
 name: vast-slicer
-description: Bring up a vast.ai GPU box running desktopia's streamed Linux desktop with the latest stable 3D Slicer, tunnel Slicer's MCP server over ssh, and drive it from here - install and test a scripted module or extension (e.g. SlicerHaversack) on a real CUDA machine. Use when asked to "bring up a vast Slicer", "get a Slicer GPU box", "test <module> on vast", or to drive/inspect a Slicer already running there.
+description: Make a fresh vast.ai GPU box running desktopia's streamed Linux desktop with the latest stable 3D Slicer and its MCP server, tunnel MCP over ssh, and drive Slicer from here - install and test a scripted module or extension (e.g. SlicerHaversack) on a real CUDA machine. Use when asked to "make/bring up a fresh (vast) Slicer box/instance", "get a Slicer GPU box", "test <module> on vast", or to drive/inspect a Slicer already running there.
 ---
 
 # vast-slicer: a Slicer dev box driven over MCP
 
 Everything runs from the desktopia repo (`~/slicer/desktopia`) through `./vast.sh` (`make` has the
-same targets). The pieces:
+same targets).
 
-- `launch.py`: rents `DESKTOPIA_CANDIDATES` (3) RTX 4090s from different providers at once and
-  measures each from this machine: `nvidia-drm modeset=Y` (else no hardware GLX), RTT, ssh
-  throughput, and the box's speed fetching Slicer. It keeps the best that passes, destroys the
-  rest, then boots the stack and opens the stream in Chrome. GL-bad machines/providers go in
-  `.bad-machines`; every measurement goes in `.host-tests.jsonl`, which `scripts/offers.py` ranks
-  by instead of vast's (unreliable) geolocation. `./vast.sh probe` runs one round and destroys
-  all of them, to build that history.
+## Quick start: a fresh MCP-enabled box (~5-10 min)
+
+A user asking for a box IS the go-ahead to rent one (see Cost): don't ask again. Steps, in order:
+
+1. **Preflight** (all free, read-only):
+   ```bash
+   cd ~/slicer/desktopia
+   ls ~/.config/vastai/vast_api_key ~/.ssh/vast-ai-rsa .venv/bin/vastai
+   ./vast.sh ls                         # note EVERY instance already running: they are not yours
+   lsof -nP -iTCP:2026 -sTCP:LISTEN     # a local Slicer often holds :2026 (see step 4)
+   pgrep -af launch.py                  # another launcher? it shares client/status.json; ask first
+   ```
+2. **Launch, in the background** (Bash `run_in_background`; it never exits on success, because it
+   keeps serving the user's page):
+   ```bash
+   ./vast.sh slicer-up 2>&1
+   ```
+   Watch its output with a Monitor that matches success AND failure, e.g.
+   `grep -E --line-buffered "^candidate|KEEP|reject|READY|Gave up|No candidate|never|bad host|has a passphrase"`.
+   What happens: it rents 3 boxes from different providers at once, tests each (GPU GL, RTT,
+   bandwidth, Slicer-download speed), keeps the best, destroys the other candidates, and provisions
+   the winner. `KEEP <id> ... 57ms 99Mb/s` names the winner; then wait for
+   `=== READY === id=<id> stream=... cert=...`.
+   - "has a passphrase and is not in ssh-agent": the user must run `ssh-add --apple-use-keychain ~/.ssh/vast-ai-rsa`.
+   - "No candidate passed" / "Gave up after N rounds": read the `reject` lines for why. Loosen with
+     `DESKTOPIA_MAX_RTT_MS` (80), `DESKTOPIA_MIN_DOWN_MBPS` (30), `DESKTOPIA_MIN_FETCH_MBS` (8),
+     or widen with `DESKTOPIA_CANDIDATES` (3) / `DESKTOPIA_ROUNDS` (2).
+3. **Pin the new box** for every later command. With other instances running, `vast.sh` would
+   otherwise pick the first one, which may be the user's:
+   ```bash
+   export DESKTOPIA_INSTANCE=<id from READY>      # put it on each command line: shell env doesn't persist
+   ```
+4. **Tunnel and wait for Slicer.** Slicer downloads (~475 MB) and starts after READY, so MCP can
+   trail READY by a few minutes:
+   ```bash
+   DESKTOPIA_INSTANCE=<id> ./vast.sh tunnel           # localhost:2026 -> box :2026, backgrounded
+   DESKTOPIA_INSTANCE=<id> ./vast.sh mcp wait-ready
+   ```
+   If a local Slicer already listens on :2026, the tunnel's localhost bind still wins and `tunnel`
+   prints a warning. To avoid any doubt, use another port for all three commands:
+   `DESKTOPIA_MCP_PORT=2036` on `slicer-up`, `tunnel` and `mcp`. Only one tunnel at a time is
+   supported (`tunnel-close` first).
+5. **Verify** it's the right box with hardware GL, and look at it:
+   ```bash
+   DESKTOPIA_INSTANCE=<id> ./vast.sh mcp py 'import slicer, os
+   rw = slicer.app.layoutManager().threeDWidget(0).threeDView().renderWindow()
+   __result = (slicer.app.applicationVersion, os.uname().nodename,
+               [l for l in rw.ReportCapabilities().splitlines() if "renderer string" in l])'
+   DESKTOPIA_INSTANCE=<id> ./vast.sh mcp screenshot <scratchpad>/slicer.png   # then Read the PNG
+   ```
+   Expect `NVIDIA GeForce RTX 4090`, not `llvmpipe`.
+6. **Report to the user**: instance id, location and measured RTT (from the `KEEP` line), that the
+   stream is in Chrome at `http://localhost:8765/index.html`, and that it bills until stopped.
+   For native MCP tools in a *new* Claude Code session (optional; `./vast.sh mcp` needs nothing):
+   `claude mcp add --transport http slicer-vast http://localhost:2026/mcp`.
+
+**If Slicer never answers** (`wait-ready` times out):
+`./vast.sh run 'tail -3 /tmp/slicer-fetch.log; pgrep -af SlicerApp-real; tail -20 /tmp/slicer.log'`.
+If the fetch finished but Slicer isn't running: `./vast.sh slicer-restart`, then `mcp wait-ready`.
+
+**If the stream picture freezes or lags** while Slicer answers MCP: the X screen is probably fine.
+Reload the tab, and close any extra tabs: each is a full-rate viewer.
+
+## How it works
+
+- `launch.py`: the candidate rental and qualification above, then boots the stack and opens the
+  stream in Chrome. GL-bad machines/providers (`nvidia-drm modeset=N`: no GBM, so Xwayland has no
+  glamor and every GLX context fails, which shows as a black Slicer window) go in `.bad-machines`.
+  Every measurement goes in `.host-tests.jsonl`, which `scripts/offers.py` ranks by instead of
+  vast's geolocation (unreliable: a "Pennsylvania" host measured 240 ms from Boston). Both files are
+  local and gitignored. `./vast.sh probe` runs one round, records it and destroys all the boxes:
+  a cheap way to build the history. `./vast.sh candidates 3` shows what the next launch would try.
 - `entrypoint-wayland.sh`: fetches the latest **stable** Slicer
   (`download.slicer.org/...stability=release`) into `/opt` on the box.
-- `session-wayland.sh`: launches Slicer as `user` on `DISPLAY=:2`. With `DESKTOPIA_MCP=1` it also
-  writes a `~/.slicerrc.py` that starts the MCP server and loads `~/slicer-modules/*`.
-  `launch.py` sets that flag through `/root/desktopia/.desktopia.env`, which also survives a
-  vast stop/start.
+- `session-wayland.sh`: launches Slicer as `user` on `DISPLAY=:2` once the fetch finishes. With
+  `DESKTOPIA_MCP=1` it also writes a `~/.slicerrc.py` that starts the MCP server and loads
+  `~/slicer-modules/*`. `launch.py` sets that flag through `/root/desktopia/.desktopia.env`, which
+  also survives a vast stop/start.
 - `scripts/slicer/desktopia_dev.py` (in Slicer): `start_mcp()` on :2026 with no access dialog,
   and `load_modules()`. The vendored MCP server is `scripts/slicer/slicer_mcp_server.py`.
 - `scripts/mcp_call.py` (here, stdlib only): the client behind `./vast.sh mcp ...`.
 
-## Before anything: cost
+## Cost and other people's boxes
 
 **Renting costs money: an RTX 4090 is about $0.5–0.7/h, billed until `stop` or `down`.**
-- Ask the user before `slicer-up`.
+- Rent only when the user asked for a box. Candidate testing adds a few cents (losers are destroyed
+  within minutes).
+- **Never stop or destroy an instance you didn't create in this task**, even one that looks idle or
+  broken: the user may be running an experiment on it. `launch.py` only ever destroys the
+  candidates it rented itself.
 - At the end, ask whether to `stop` (keeps the disk; restarts in about a minute) or `down`
-  (destroys everything).
-- Never leave a box running without saying so. `./vast.sh ls` shows what is running.
-
-Prerequisites, all read-only to check:
-- `~/.config/vastai/vast_api_key`
-- `~/.ssh/vast-ai-rsa`, registered with vast
-- `desktopia/.venv/bin/vastai` (vast.sh puts the venv on PATH)
-- `./vast.sh ls` and `./vast.sh search` cost nothing
-
-## Bring-up
-
-```bash
-cd ~/slicer/desktopia
-./vast.sh slicer-up          # run in the BACKGROUND; it keeps serving the page after READY
-```
-- Watch its output for `=== READY === id=<instance> ...`. That takes about 5–10 min: renting,
-  image pull, deps, compositor.
-- Chrome opens `http://localhost:8765/index.html`, which is the user's view of the desktop.
-- On "Gave up after 3 hosts", or "SSH never authorized", read `vastai logs <id>` before
-  retrying.
-- With more than one instance, set `DESKTOPIA_INSTANCE=<id>` for every later command.
-
-Then:
-```bash
-./vast.sh tunnel             # localhost:2026 -> the box's :2026 (backgrounded; tunnel-close ends it)
-./vast.sh mcp wait-ready     # polls until Slicer answers; its download+start can trail READY by minutes
-./vast.sh mcp tools
-./vast.sh mcp py 'import slicer; __result = slicer.app.applicationVersion'
-./vast.sh mcp screenshot /tmp/slicer.png      # then Read the PNG to see the desktop
-```
-For native MCP tools in a *new* Claude Code session (optional; the CLI needs no restart):
-`claude mcp add --transport http slicer-vast http://localhost:2026/mcp`.
+  (destroys everything). Never leave a box running without saying so.
 
 ## Installing code to test
 
@@ -160,9 +198,11 @@ PanTS's region decode.
 ## Teardown
 
 ```bash
-./vast.sh tunnel-close
-./vast.sh stop      # or: ./vast.sh down  - ask the user which
+DESKTOPIA_INSTANCE=<id> ./vast.sh tunnel-close
+DESKTOPIA_INSTANCE=<id> ./vast.sh stop      # or: down - ask the user which; ONLY the box you made
 ```
+- Stopping the background `slicer-up` launcher (TaskStop) only ends the local page server and
+  status updates; it does not touch the instance.
 - After `./vast.sh start`, the onstart reboot brings the desktop and MCP back on its own, via
   `.desktopia.env`.
 - Then run `./vast.sh tunnel` and `./vast.sh mcp wait-ready` again. There is no need to
